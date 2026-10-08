@@ -19,6 +19,9 @@ import duckdb
 from mcp.server.fastmcp import FastMCP
 
 MAX_ROWS = 100
+STREET_TYPES = {"AV": "AVENIDA", "AVENIDA": "AVENIDA", "R": "RUA", "RUA": "RUA", "AL": "ALAMEDA", "ALAMEDA": "ALAMEDA", "TV": "TRAVESSA", "TRAV": "TRAVESSA",
+                "TRAVESSA": "TRAVESSA", "ROD": "RODOVIA", "RODOVIA": "RODOVIA", "EST": "ESTRADA", "ESTR": "ESTRADA", "ESTRADA": "ESTRADA", "PC": "PRACA",
+                "PCA": "PRACA", "PRACA": "PRACA", "PRAÇA": "PRACA", "LG": "LARGO", "LARGO": "LARGO", "PQ": "PARQUE", "PARQUE": "PARQUE", "VL": "VILA"}
 QUERY_TIMEOUT_S = float(os.environ.get("CNPJ_QUERY_TIMEOUT", "40"))
 
 NOTE = (
@@ -31,6 +34,11 @@ NOTE = (
 )
 mcp = FastMCP("cnpj-mcp", instructions=NOTE)
 _con: Optional[duckdb.DuckDBPyConnection] = None
+
+
+def _has_key() -> bool:
+    con()
+    return (data_dir() / "est_cnpj").is_dir()
 
 
 def data_dir() -> Path:
@@ -54,6 +62,8 @@ def con() -> duckdb.DuckDBPyConnection:
         c.execute(f"SET temp_directory='{d}/.tmp'")
         c.execute(f"CREATE VIEW e AS SELECT * FROM read_parquet('{d}/estabelecimentos/*/*.parquet', hive_partitioning=true)")
         c.execute(f"CREATE VIEW s AS SELECT * FROM read_parquet('{d}/socios.parquet')")
+        if (d / "est_cnpj").is_dir():
+            c.execute(f"CREATE VIEW k AS SELECT * FROM read_parquet('{d}/est_cnpj/*.parquet')")
         if (d / "socios_nome.parquet").exists():
             c.execute(f"CREATE VIEW sn AS SELECT * FROM read_parquet('{d}/socios_nome.parquet')")
         for t in ("cnaes", "municipios", "naturezas", "motivos", "paises", "qualificacoes"):
@@ -176,9 +186,10 @@ def _filters(cnae=None, cnae_secao=None, include_secondary=False, uf=None, munic
         w.append("e.matriz_filial = 1")
     if porte:
         k = porte.lower().strip()
+        k = {"me": "micro", "microempresa": "micro", "epp": "pequeno", "pequeno porte": "pequeno", "empresa de pequeno porte": "pequeno"}.get(k, k)
         code = PORTE.get(k) or (k if k in PORTE_NOME else None)
         if not code:
-            raise ValueError("porte must be one of: micro, pequeno, demais, nao_informado")
+            raise ValueError("porte must be one of: micro (ME), pequeno (EPP), demais, nao_informado")
         w.append("e.porte = ?"); p.append(code)
     if natureza_juridica:
         x = natureza_juridica.strip()
@@ -219,13 +230,17 @@ def _fmt_cnpj(c: str) -> str:
 
 
 def _page(limit: int, offset: int = 0) -> tuple[int, int]:
-    return max(1, min(int(limit), MAX_ROWS)), max(0, int(offset))
+    if int(limit) < 1:
+        raise ValueError("limit must be at least 1")
+    if int(offset) < 0:
+        raise ValueError("offset cannot be negative")
+    return min(int(limit), MAX_ROWS), int(offset)
 
 
 FILTER_DOC = (
     "Filters (all optional, combined with AND): cnae (CNAE code or prefix, e.g. '4711' or '47', list ok; add include_secondary to also match secondary activities), "
     "cnae_secao (letter A-U), uf, municipio (name as in Receita, accents ignored), municipio_codigo, situacao (ativa, baixada, suspensa, inapta, nula), matriz_only, "
-    "porte (micro, pequeno, demais, nao_informado), natureza_juridica (code prefix like '2062' or text like 'sociedade limitada'), capital_min/capital_max (BRL), "
+    "porte (micro = ME, pequeno = EPP, demais, nao_informado), natureza_juridica (code prefix like '2062' or text like 'sociedade limitada'), capital_min/capital_max (BRL), "
     "opened_from/opened_to (data_inicio_atividade, YYYY-MM or YYYY-MM-DD), closed_from/closed_to (data da baixa), mei, simples (true/false), "
     "name_contains (razao social or nome fantasia), cep, partner_name (a partner's name contains this text)."
 )
@@ -234,7 +249,11 @@ FILTER_DOC = (
 @mcp.tool(description="What data is loaded: source, snapshot month, row counts, field meanings and caveats. Call first if unsure what the tools cover.")
 def dataset_info() -> dict:
     m = meta()
-    return {"note": NOTE, "snapshot_month": m.get("month"), "establishments": m.get("estabelecimentos"), "companies": m.get("empresas"), "partner_links": m.get("socios"),
+    out_extra = {}
+    if m.get("latest_opening_date"):
+        out_extra["snapshot_boundary"] = (f"Receita publishes the dump mid-month: the latest opening date in {m.get('month')} is {m['latest_opening_date']}, "
+                                          "so that month is partial for openings and closures. Compare full months only.")
+    return {**out_extra, "note": NOTE, "snapshot_month": m.get("month"), "establishments": m.get("estabelecimentos"), "companies": m.get("empresas"), "partner_links": m.get("socios"),
             "source": "Receita Federal, Dados Abertos CNPJ (https://www.gov.br/receitafederal/pt-br/acesso-a-informacao/dados-abertos/cadastros)",
             "codes": {"situacao": SITUACAO, "porte": PORTE, "cnae_secoes": SECOES},
             "group_by_options": sorted(GROUPS)}
@@ -328,8 +347,13 @@ def get_company(cnpj: str) -> dict:
     x = _digits(cnpj, "cnpj", 8, 14)
     if len(x) not in (8, 14):
         raise ValueError("cnpj must be 14 digits (or the 8-digit root)")
-    where, p = ("e.cnpj_basico = ? AND e.matriz_filial = 1", [x]) if len(x) == 8 else ("e.cnpj = ?", [x])
-    rows = run(f"SELECT e.* EXCLUDE (uf) , e.uf FROM e WHERE {where} LIMIT 1", p)
+    ix = _has_key()
+    if ix:
+        where, p = ("e.cnpj >= ? AND e.cnpj <= ? AND e.matriz_filial = 1", [x + "000000", x + "999999"]) if len(x) == 8 else ("e.cnpj = ?", [x])
+        rows = run(f"SELECT e.* EXCLUDE (uf) , e.uf FROM k AS e WHERE {where} ORDER BY e.cnpj LIMIT 1", p)
+    else:
+        where, p = ("e.cnpj_basico = ? AND e.matriz_filial = 1", [x]) if len(x) == 8 else ("e.cnpj = ?", [x])
+        rows = run(f"SELECT e.* EXCLUDE (uf) , e.uf FROM e WHERE {where} LIMIT 1", p)
     if not rows:
         return {"error": f"CNPJ {cnpj} is not in this snapshot. It may be invalid, newer than the snapshot, or the number was never issued."}
     r = rows[0]
@@ -341,7 +365,10 @@ def get_company(cnpj: str) -> dict:
     if r.get("cnae_secundaria"):
         codes = r["cnae_secundaria"].split(",")[:50]
         r["cnae_secundaria_descricoes"] = run("SELECT codigo, descricao FROM cnaes WHERE codigo IN (" + ",".join("?" * len(codes)) + ")", codes)
-    r["estabelecimentos_total"] = run("SELECT count(*) AS n FROM e WHERE cnpj_basico = ?", [base])[0]["n"]
+    if ix:
+        r["estabelecimentos_total"] = run("SELECT count(*) AS n FROM k WHERE cnpj >= ? AND cnpj <= ?", [base + "000000", base + "999999"])[0]["n"]
+    else:
+        r["estabelecimentos_total"] = run("SELECT count(*) AS n FROM e WHERE cnpj_basico = ?", [base])[0]["n"]
     r["socios"] = run("SELECT nome_socio, CASE identificador_socio WHEN 1 THEN 'pessoa juridica' WHEN 2 THEN 'pessoa fisica' ELSE 'estrangeiro' END AS tipo, "
                       "cnpj_cpf_socio, qualificacao_socio_descricao AS qualificacao, data_entrada, faixa_etaria, nome_representante FROM s WHERE cnpj_basico = ? "
                       "ORDER BY data_entrada LIMIT 100", [base])
@@ -377,6 +404,37 @@ def search_partners(name: str, contains: bool = False, cpf_middle: Optional[str]
     else:
         src = "s"
     limit, offset = _page(limit, offset)
+    if src == "sn" and _has_key():
+        # fast path: exact name via the name index, then primary-key lookups of the matriz rows
+        np = p[: len(p) - (1 if uf else 0)]
+        cand = run(f"SELECT nome_socio, cnpj_cpf_socio, qualificacao_socio_descricao AS qualificacao, data_entrada, cnpj_basico FROM sn AS s WHERE {' AND '.join(w)} LIMIT 5000", np)
+        out = []
+        bases = sorted({c["cnpj_basico"] for c in cand})
+        if len(bases) > 300:
+            cand = None  # very common name: use the join path below, which can filter by state first
+        if cand is not None and cand:
+            info = {}
+            for i in range(0, len(bases), 100):
+                part = bases[i:i + 100]
+                q = ("SELECT cnpj, razao_social, situacao_cadastral, data_inicio_atividade, cnae_principal_descricao, municipio, uf FROM k WHERE matriz_filial = 1 AND ("
+                     + " OR ".join("(cnpj >= ? AND cnpj <= ?)" for _ in part) + ")" + (" AND uf = ?" if uf else ""))
+                prm = [v for b in part for v in (b + "000000", b + "999999")] + ([uf.upper()] if uf else [])
+                for r in run(q, prm):
+                    info.setdefault(r["cnpj"][:8], r)
+            for c in cand:
+                r = info.get(c["cnpj_basico"])
+                if r:
+                    out.append({"nome_socio": c["nome_socio"], "cnpj_cpf_socio": c["cnpj_cpf_socio"], "qualificacao": c["qualificacao"], "data_entrada": c["data_entrada"], **r})
+            out.sort(key=lambda r: str(r["data_entrada"] or ""), reverse=True)
+        if cand is not None:
+            more = len(out) > offset + limit
+            rows = out[offset: offset + limit]
+            for r in rows:
+                r["situacao"] = SITUACAO_NOME.get(r.pop("situacao_cadastral"))
+                r["cnpj_formatado"] = _fmt_cnpj(r["cnpj"])
+            if more:
+                rows.append({"truncated": True, "next_offset": offset + limit})
+            return rows or [{"message": "No partner matched. Names are stored in capitals as Receita publishes them; try contains=true."}]
     rows = run(f"""WITH s AS MATERIALIZED (SELECT * FROM {src} AS s WHERE {' AND '.join(w)})
         SELECT s.nome_socio, s.cnpj_cpf_socio, s.qualificacao_socio_descricao AS qualificacao, s.data_entrada, e.cnpj, e.razao_social, e.situacao_cadastral,
         e.data_inicio_atividade, e.cnae_principal_descricao, e.municipio, e.uf
@@ -401,7 +459,13 @@ def companies_at_address(cep: Optional[str] = None, logradouro_contains: Optiona
     if cep:
         w.append("e.cep = ?"); p.append(_digits(cep, "cep", 8, 8))
     if logradouro_contains:
-        w.append("strip_accents(e.logradouro) ILIKE strip_accents(?) ESCAPE '\\'"); p.append(_like(logradouro_contains))
+        text = logradouro_contains.strip()
+        first, _, rest = text.partition(" ")
+        tipo = STREET_TYPES.get(first.upper().rstrip(".")) if rest.strip() else None
+        if tipo:
+            w.append("e.tipo_logradouro = ?"); p.append(tipo)
+            text = rest.strip()
+        w.append("strip_accents(e.logradouro) ILIKE strip_accents(?) ESCAPE '\\'"); p.append(_like(text))
     if numero:
         w.append("e.numero = ?"); p.append(numero.strip())
     if municipio:
