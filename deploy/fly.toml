@@ -1,0 +1,10 @@
+app = "cnpj-mcp"
+primary_region = "iad"
+[build]
+  dockerfile = "Dockerfile"
+[mounts]
+  source = "cnpjdata"
+  destination = "/data"
+[[vm]]
+  size = "performance-8x"
+  memory = "16gb"
