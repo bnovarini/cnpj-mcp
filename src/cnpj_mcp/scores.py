@@ -43,7 +43,12 @@ def build_scores(data, memory="1200MB", threads=2):
         print(name, round(time.time() - t0), flush=True)
     c.execute(f"CREATE VIEW email_src AS SELECT lower(trim(email)) em, cnpj_basico FROM {src} WHERE email IS NOT NULL")
     bucketed("email_n", "lower(trim(email)) AS em", "email IS NOT NULL", "em")
-    bucketed("domain_n", "lower(split_part(email,'@',2)) AS dom", "email LIKE '%@%.%'", "dom")
+    if not os.path.exists(f"{tmp}/domain_n/all.parquet"):
+        os.makedirs(f"{tmp}/domain_n", exist_ok=True)
+        c.execute(f"""COPY (SELECT lower(split_part(email,'@',2)) AS dom, count(DISTINCT cnpj_basico) n FROM {src} WHERE email LIKE '%@%.%' GROUP BY 1)
+          TO '{tmp}/domain_n/all.tmp' (FORMAT parquet)""")
+        os.replace(f"{tmp}/domain_n/all.tmp", f"{tmp}/domain_n/all.parquet")
+    print("domain_n", round(time.time() - t0), flush=True)
     for i in range(NB):
         f = f"{tmp}/phone_n/b{i:02d}.parquet"
         os.makedirs(f"{tmp}/phone_n", exist_ok=True)
@@ -64,12 +69,12 @@ def build_scores(data, memory="1200MB", threads=2):
     os.makedirs(out, exist_ok=True)
 
     def phone_kind(ddd, tel):
-        # Brazilian numbers: mobile = 9 digits starting with 9, landline = 8 digits starting 2-5, 0800/4004-style = other
+        # Brazilian numbers: mobile = 9 digits starting with 9, or 8 digits starting 6-9 (Receita often stores them without the ninth digit); landline = 8 digits starting 2-5
         return f"""CASE WHEN {tel} IS NULL THEN NULL
           WHEN replace({tel}, substr({tel},1,1), '') = '' OR {tel} IN ('12345678','123456789') OR {ddd} IS NULL OR length({ddd}) <> 2 OR {ddd} = '00' THEN 'invalid'
           WHEN length({tel}) = 9 AND {tel} LIKE '9%' THEN 'mobile'
+          WHEN length({tel}) = 8 AND substr({tel},1,1) IN ('6','7','8','9') THEN 'mobile'
           WHEN length({tel}) = 8 AND substr({tel},1,1) IN ('2','3','4','5') THEN 'landline'
-          WHEN length({tel}) = 8 AND substr({tel},1,1) IN ('6','7','8','9') THEN 'mobile_old'
           ELSE 'invalid' END"""
 
     def share_pts(n):
@@ -99,7 +104,7 @@ def build_scores(data, memory="1200MB", threads=2):
           s AS (
             SELECT k.*,
               CASE WHEN email_kind IS NULL THEN NULL ELSE greatest(0, least(100,
-                CASE email_kind WHEN 'corporate' THEN 55 WHEN 'generic' THEN 30 WHEN 'accountant' THEN 15 ELSE 0 END
+                CASE email_kind WHEN 'corporate' THEN 55 WHEN 'generic' THEN 30 WHEN 'accountant' THEN 15 WHEN 'typo' THEN 5 ELSE 0 END
                 + {share_pts('email_n')} + CASE WHEN coalesce(name_match,false) THEN 20 ELSE 0 END
                 - CASE WHEN email_kind = 'corporate' AND domain_n > 20 THEN 25 ELSE 0 END)) END email_score,
               greatest(
@@ -109,8 +114,8 @@ def build_scores(data, memory="1200MB", threads=2):
           SELECT cnpj, email_kind, email_n AS email_shared_companies, domain_n AS email_domain_companies, coalesce(name_match,false) AS email_matches_name,
             email_score, p1_kind AS phone1_kind, p1_n AS phone1_shared_companies, p2_kind AS phone2_kind, p2_n AS phone2_shared_companies, phone_score,
             greatest(coalesce(email_score,0), coalesce(phone_score,0)) AS contact_score,
-            CASE WHEN greatest(coalesce(email_score,0), coalesce(phone_score,0)) >= 70 THEN 'high'
-                 WHEN greatest(coalesce(email_score,0), coalesce(phone_score,0)) >= 40 THEN 'medium' ELSE 'low' END AS contact_tier
+            CASE WHEN greatest(coalesce(email_score,0), coalesce(phone_score,0)) >= 85 THEN 'high'
+                 WHEN greatest(coalesce(email_score,0), coalesce(phone_score,0)) >= 50 THEN 'medium' ELSE 'low' END AS contact_tier
           FROM s ORDER BY cnpj) TO '{out}/part{dgt}.parquet' (FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE 50000)""")
         print("part", dgt, round(time.time() - t0), flush=True)
     dest = f"{data}/contact_score"
