@@ -51,6 +51,12 @@ Signals, all computed from the Receita dump itself:
 
 `contact_score` is the better of the email score and the phone score. `min_contact_score` on `search_companies` keeps only companies at or above a score; it filters after reading each page, so one call looks at most 2000 candidates and returns `next_offset` to continue. Rebuild with `python -m cnpj_mcp.scores <data_dir>` after each monthly build.
 
+## Company website crawl (experimental, not served yet)
+
+`python -m cnpj_mcp.crawl domains.tsv out.jsonl` visits the websites behind corporate email domains and records what the company itself publishes: WhatsApp links, phones, emails and social profiles, each with the page it came from. It obeys robots.txt, identifies itself, makes at most one request per second per domain and reads at most the home page plus one contact page. These results come from the company's own site and are kept separate from Receita fields.
+
+On a sample of about 1,250 domains used by one to three companies, 60% of sites loaded, and 24% of sampled domains showed a WhatsApp link, 38% a phone, 34% an email and 31% a social profile.
+
 ## Read this before quoting numbers
 
 - The registry shows the current state only. A company's earlier addresses, activities and capital are not kept.
