@@ -140,8 +140,18 @@ def build(raw: str, out: str, month: str, memory: str = "1200MB", threads: int =
     c.execute(f"""COPY (SELECT strip_accents(upper(nome_socio)) AS nome_key, * FROM read_parquet('{out}/socios.parquet') ORDER BY nome_key)
       TO '{out}/socios_nome.tmp.parquet' (FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE 100000)""")
     os.replace(f"{out}/socios_nome.tmp.parquet", f"{out}/socios_nome.parquet")
+    # primary-key copy (sorted by cnpj, built in ten first-digit slices to keep spill small) for fast single-company and partner lookups
+    kdir = f"{out}/est_cnpj.new"
+    os.makedirs(kdir, exist_ok=True)
+    for dgt in "0123456789":
+        c.execute(f"""COPY (SELECT * FROM read_parquet('{dest}/*/*.parquet', hive_partitioning=true) WHERE cnpj LIKE '{dgt}%' ORDER BY cnpj)
+          TO '{kdir}/part{dgt}.parquet' (FORMAT parquet, COMPRESSION zstd, COMPRESSION_LEVEL 3, ROW_GROUP_SIZE 50000)""")
+    if os.path.exists(f"{out}/est_cnpj"):
+        shutil.rmtree(f"{out}/est_cnpj")
+    os.rename(kdir, f"{out}/est_cnpj")
+    meta["latest_opening_date"] = str(c.execute(f"SELECT max(data_inicio_atividade) FROM read_parquet('{out}/est_cnpj/*.parquet')").fetchone()[0])
     meta["estabelecimentos"] = c.execute(f"SELECT count(*) FROM read_parquet('{dest}/*/*.parquet')").fetchone()[0]
-    meta["empresas"] = c.execute(f"SELECT count(DISTINCT cnpj_basico) FROM read_parquet('{raw}/empresas/*.parquet')").fetchone()[0]
+    meta["empresas"] = c.execute(f"SELECT count(*) FROM read_parquet('{dest}/*/*.parquet') WHERE matriz_filial = 1").fetchone()[0]
     meta["socios"] = c.execute(f"SELECT count(*) FROM read_parquet('{out}/socios.parquet')").fetchone()[0]
     shutil.rmtree(done_dir, ignore_errors=True)
     shutil.rmtree(stage, ignore_errors=True)
