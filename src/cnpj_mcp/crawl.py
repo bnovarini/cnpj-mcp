@@ -108,8 +108,12 @@ async def get(client, pacer, url, rp):
             return (str(r.url), buf.decode(enc, errors="replace")), "ok"
     except httpx.ConnectError as e:
         return None, "dns_or_connect_fail"
+    except httpx.ConnectTimeout:
+        return None, "timeout_connect"
+    except httpx.PoolTimeout:
+        return None, "timeout_pool"
     except httpx.TimeoutException:
-        return None, "timeout"
+        return None, "timeout_read"
     except Exception as e:
         return None, "error_" + type(e).__name__
 
@@ -134,8 +138,11 @@ async def crawl_domain(client, pacer, dom, cnpj, sem):
                 break
             except httpx.ConnectError:
                 continue
+            except httpx.PoolTimeout:
+                rec["status"] = "timeout_pool"
+                continue
             except httpx.TimeoutException:
-                rec["status"] = "timeout"
+                rec["status"] = "timeout_connect"
                 continue
             except Exception:
                 continue
@@ -180,15 +187,18 @@ async def main(inp, outp, conc=40):
                 pass
     rows = [l.rstrip("\n").split("\t") for l in open(inp) if l.strip()]
     rows = [r for r in rows if r[0] not in done]
-    deadline = time.time() + float(os.environ.get("CRAWL_MAX_SECONDS", "0") or 1e12)
+    deadline = time.time() + float(os.environ.get("CRAWL_MAX_SECONDS") or 1e12)
     print(f"{len(done)} already done, {len(rows)} to crawl, {conc} workers", flush=True)
     pacer = Pacer()
+    # DNS lookups run in the default thread pool; its small default size queues lookups and shows up as false connect timeouts
+    from concurrent.futures import ThreadPoolExecutor
+    asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=min(conc, 400)))
     limits = httpx.Limits(max_connections=conc * 2, max_keepalive_connections=20)
     q = asyncio.Queue()
     for r in rows:
         q.put_nowait(r)
     count = 0
-    async with httpx.AsyncClient(headers={"User-Agent": UA, "Accept-Language": "pt-BR,pt;q=0.9"}, timeout=httpx.Timeout(10, connect=6),
+    async with httpx.AsyncClient(headers={"User-Agent": UA, "Accept-Language": "pt-BR,pt;q=0.9"}, timeout=httpx.Timeout(10, connect=10),
                                  follow_redirects=True, limits=limits, max_redirects=4, verify=False) as client:
         with open(outp, "a") as out:
             async def worker():
@@ -199,7 +209,10 @@ async def main(inp, outp, conc=40):
                         r = q.get_nowait()
                     except asyncio.QueueEmpty:
                         return
-                    rec = await crawl_domain(client, pacer, r[0], r[1] if len(r) > 1 else "", one)
+                    try:
+                        rec = await asyncio.wait_for(crawl_domain(client, pacer, r[0], r[1] if len(r) > 1 else "", one), 45)
+                    except asyncio.TimeoutError:
+                        rec = {"domain": r[0], "cnpj": r[1] if len(r) > 1 else "", "status": "timeout_total", "pages": [], "crawled_at": int(time.time())}
                     pacer.last.pop(r[0], None)
                     pacer.last.pop("www." + r[0], None)
                     out.write(json.dumps(rec, ensure_ascii=False) + "\n")
