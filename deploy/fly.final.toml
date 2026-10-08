@@ -1,0 +1,37 @@
+app = "cnpj-mcp"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile.final"
+
+[env]
+  CNPJ_DATA_DIR = "/data/cnpj"
+  CNPJ_ALLOWED_HOSTS = "cnpj-mcp.fly.dev"
+  CNPJ_MEMORY_LIMIT = "1400MB"
+  CNPJ_THREADS = "2"
+  CNPJ_QUERY_TIMEOUT = "40"
+  CNPJ_RATE_PER_MIN = "40"
+
+[mounts]
+  source = "cnpjdata"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "off"
+  min_machines_running = 1
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 20
+    hard_limit = 40
+  [[http_service.checks]]
+    method = "GET"
+    path = "/healthz"
+    interval = "30s"
+    timeout = "10s"
+    grace_period = "30s"
+
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "2gb"
