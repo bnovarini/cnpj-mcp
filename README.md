@@ -38,6 +38,19 @@ CNPJ_DATA_DIR=./data cnpj-mcp          # MCP server over stdio
 
 Tools: `dataset_info`, `search_companies`, `count_companies`, `get_company`, `list_partners`, `search_partners`, `companies_at_address`, `lookup_codes`.
 
+## Contact quality score
+
+`get_company` and `search_companies` (with `include_contacts`) return a `contact_quality` block: a 0-100 `contact_score`, a tier (high 85+, medium 50-84, low below 50) and the signals behind it. It estimates how likely the email or phone registered with Receita is a real, direct contact. It does not check that anyone answers.
+
+Signals, all computed from the Receita dump itself:
+
+- Email kind: corporate domain, free provider (gmail, hotmail, uol...), accountant-looking address, mistyped free provider (gmial.com), or invalid.
+- How many companies share the same email, and how many use the same email domain. One company is a good sign; dozens usually means an accountant or a shared mailbox.
+- Whether the email matches the company name.
+- Phone type (mobile or landline; Receita often stores mobiles without the ninth digit) and how many companies share the phone.
+
+`contact_score` is the better of the email score and the phone score. `min_contact_score` on `search_companies` keeps only companies at or above a score; it filters after reading each page, so one call looks at most 2000 candidates and returns `next_offset` to continue. Rebuild with `python -m cnpj_mcp.scores <data_dir>` after each monthly build.
+
 ## Read this before quoting numbers
 
 - The registry shows the current state only. A company's earlier addresses, activities and capital are not kept.
