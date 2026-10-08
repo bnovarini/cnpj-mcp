@@ -41,6 +41,32 @@ def _has_key() -> bool:
     return (data_dir() / "est_cnpj").is_dir()
 
 
+def _has_score() -> bool:
+    return (data_dir() / "contact_score").is_dir()
+
+
+_SCORE_COLS = ("contact_score", "contact_tier", "email_kind", "email_shared_companies", "email_domain_companies", "email_matches_name", "email_score",
+               "phone1_kind", "phone1_shared_companies", "phone2_kind", "phone2_shared_companies", "phone_score")
+
+
+def _scores(cnpjs: list[str]) -> dict[str, dict]:
+    """Contact-quality score and the signals behind it, keyed by CNPJ. Empty if the score table is not built."""
+    if not cnpjs or not _has_score():
+        return {}
+    rows = run("SELECT cnpj, " + ", ".join(_SCORE_COLS) + " FROM cs WHERE cnpj IN (" + ",".join("?" * len(cnpjs)) + ")", list(cnpjs))
+    return {r["cnpj"]: r for r in rows}
+
+
+def _contact_block(r: Optional[dict]) -> Optional[dict]:
+    if not r:
+        return None
+    return {"contact_score": r["contact_score"], "contact_tier": r["contact_tier"],
+            "signals": {"email": {"kind": r["email_kind"], "score": r["email_score"], "companies_sharing_this_email": r["email_shared_companies"],
+                                  "companies_using_this_email_domain": r["email_domain_companies"], "email_matches_company_name": r["email_matches_name"]},
+                        "phone": {"score": r["phone_score"], "phone1_kind": r["phone1_kind"], "companies_sharing_phone1": r["phone1_shared_companies"],
+                                  "phone2_kind": r["phone2_kind"], "companies_sharing_phone2": r["phone2_shared_companies"]}}}
+
+
 def data_dir() -> Path:
     return Path(os.environ.get("CNPJ_DATA_DIR", str(Path.home() / ".cache" / "cnpj-mcp")))
 
@@ -64,6 +90,8 @@ def con() -> duckdb.DuckDBPyConnection:
         c.execute(f"CREATE VIEW s AS SELECT * FROM read_parquet('{d}/socios.parquet')")
         if (d / "est_cnpj").is_dir():
             c.execute(f"CREATE VIEW k AS SELECT * FROM read_parquet('{d}/est_cnpj/*.parquet')")
+        if (d / "contact_score").is_dir():
+            c.execute(f"CREATE VIEW cs AS SELECT * FROM read_parquet('{d}/contact_score/*.parquet')")
         if (d / "socios_nome.parquet").exists():
             c.execute(f"CREATE VIEW sn AS SELECT * FROM read_parquet('{d}/socios_nome.parquet')")
         for t in ("cnaes", "municipios", "naturezas", "motivos", "paises", "qualificacoes"):
@@ -260,33 +288,68 @@ def dataset_info() -> dict:
 
 
 @mcp.tool(description="Find companies/establishments matching filters. " + FILTER_DOC + " Returns up to 100 rows per page, ordered by opening date (newest first) unless order_by is "
-                      "capital_social or razao_social. Use count_companies for 'how many' questions. Set include_contacts to add email, phones and full address.")
+                      "capital_social or razao_social. Use count_companies for 'how many' questions. Set include_contacts to add email, phones, full address and a contact_quality block (0-100 score of how likely the registered email/phone is a real direct contact, with the signals behind it). "
+                      "min_contact_score keeps only companies at or above that score; it is applied after the page is read, so a call scans at most 2000 candidates and returns next_offset to continue.")
 def search_companies(cnae: Optional[list[str]] = None, cnae_secao: Optional[str] = None, include_secondary: bool = False, uf: Optional[str] = None,
                      municipio: Optional[str] = None, municipio_codigo: Optional[str] = None, situacao: Optional[str] = None, matriz_only: bool = False,
                      porte: Optional[str] = None, natureza_juridica: Optional[str] = None, capital_min: Optional[float] = None, capital_max: Optional[float] = None,
                      opened_from: Optional[str] = None, opened_to: Optional[str] = None, closed_from: Optional[str] = None, closed_to: Optional[str] = None,
                      mei: Optional[bool] = None, simples: Optional[bool] = None, name_contains: Optional[str] = None, cep: Optional[str] = None,
                      partner_name: Optional[str] = None, order_by: str = "data_inicio_atividade", include_contacts: bool = False,
-                     limit: int = 25, offset: int = 0) -> list[dict]:
+                     min_contact_score: Optional[int] = None, limit: int = 25, offset: int = 0) -> list[dict]:
     where, p = _filters(cnae, cnae_secao, include_secondary, uf, municipio, municipio_codigo, situacao, matriz_only, porte, natureza_juridica, capital_min,
                         capital_max, opened_from, opened_to, closed_from, closed_to, mei, simples, name_contains, cep, partner_name)
     orders = {"data_inicio_atividade": "e.data_inicio_atividade DESC NULLS LAST", "capital_social": "e.capital_social DESC NULLS LAST", "razao_social": "e.razao_social"}
     if order_by not in orders:
         raise ValueError("order_by must be data_inicio_atividade, capital_social or razao_social")
     limit, offset = _page(limit, offset)
+    if min_contact_score is not None:
+        if not isinstance(min_contact_score, int) or not 0 <= min_contact_score <= 100:
+            raise ValueError("min_contact_score must be an integer from 0 to 100")
+        if not _has_score():
+            raise ValueError("The contact score table is not built on this server.")
+    want_score = include_contacts or min_contact_score is not None
     extra = (", e.email, e.ddd1, e.telefone1, e.ddd2, e.telefone2, e.tipo_logradouro, e.logradouro, e.numero, e.complemento, e.bairro, e.cep") if include_contacts else ""
-    rows = run(f"""SELECT e.cnpj, e.razao_social, e.nome_fantasia, e.situacao_cadastral, e.data_situacao_cadastral, e.data_inicio_atividade, e.matriz_filial,
+    sel = f"""SELECT e.cnpj, e.razao_social, e.nome_fantasia, e.situacao_cadastral, e.data_situacao_cadastral, e.data_inicio_atividade, e.matriz_filial,
         e.cnae_principal, e.cnae_principal_descricao, e.natureza_juridica, e.natureza_juridica_descricao, e.porte, e.capital_social,
         e.opcao_mei AS mei, e.opcao_simples AS simples, e.municipio, e.uf{extra}
-        FROM e WHERE {where} ORDER BY {orders[order_by]}, e.cnpj LIMIT {limit + 1} OFFSET {offset}""", p)
-    more = len(rows) > limit
+        FROM e WHERE {where} ORDER BY {orders[order_by]}, e.cnpj"""
+    if min_contact_score is None:
+        rows = run(f"{sel} LIMIT {limit + 1} OFFSET {offset}", p)
+        sc = _scores([r["cnpj"] for r in rows[:limit]]) if want_score else {}
+    else:
+        # the score lives in a side table, so filter after the page is read; scan at most 2000 candidates per call
+        rows, sc, scanned, pos, more_scan, done = [], {}, 0, offset, False, False
+        while not done and scanned < 2000:
+            batch = run(f"{sel} LIMIT 250 OFFSET {pos}", p)
+            if not batch:
+                break
+            got = _scores([r["cnpj"] for r in batch])
+            for r in batch:
+                g = got.get(r["cnpj"])
+                if g and g["contact_score"] >= min_contact_score:
+                    if len(rows) == limit:
+                        rows.append(r)  # one extra row marks that more matches exist
+                        done = True
+                        break
+                    sc[r["cnpj"]] = g
+                    rows.append(r)
+                pos += 1
+                scanned += 1
+            if len(batch) < 250:
+                break
+        else:
+            more_scan = not done
+    more = len(rows) > limit or (min_contact_score is not None and more_scan)
     rows = rows[:limit]
     for r in rows:
         r["cnpj_formatado"] = _fmt_cnpj(r["cnpj"])
         r["situacao"] = SITUACAO_NOME.get(r.pop("situacao_cadastral"))
         r["porte"] = PORTE_NOME.get(r["porte"], r["porte"])
+        if want_score:
+            r["contact_quality"] = _contact_block(sc.get(r["cnpj"]))
     if more:
-        rows.append({"truncated": True, "next_offset": offset + limit, "message": "More matches exist; raise offset or narrow filters."})
+        rows.append({"truncated": True, "next_offset": (pos if min_contact_score is not None else offset + limit), "message": "More matches exist; raise offset or narrow filters."})
     if not rows:
         rows.append({"message": "No companies matched. Check spelling of municipio (Receita writes names in capitals, e.g. 'SAO PAULO'), and that situacao is not excluding closed companies."})
     return rows
@@ -369,6 +432,9 @@ def get_company(cnpj: str) -> dict:
         r["estabelecimentos_total"] = run("SELECT count(*) AS n FROM k WHERE cnpj >= ? AND cnpj <= ?", [base + "000000", base + "999999"])[0]["n"]
     else:
         r["estabelecimentos_total"] = run("SELECT count(*) AS n FROM e WHERE cnpj_basico = ?", [base])[0]["n"]
+    sc = _scores([r["cnpj"]]).get(r["cnpj"])
+    if sc:
+        r["contact_quality"] = _contact_block(sc)
     r["socios"] = run("SELECT nome_socio, CASE identificador_socio WHEN 1 THEN 'pessoa juridica' WHEN 2 THEN 'pessoa fisica' ELSE 'estrangeiro' END AS tipo, "
                       "cnpj_cpf_socio, qualificacao_socio_descricao AS qualificacao, data_entrada, faixa_etaria, nome_representante FROM s WHERE cnpj_basico = ? "
                       "ORDER BY data_entrada LIMIT 100", [base])
