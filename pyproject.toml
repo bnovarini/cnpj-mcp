@@ -1,0 +1,17 @@
+[project]
+name = "cnpj-mcp"
+version = "0.1.0"
+description = "MCP server for analytical queries over Brazil's open CNPJ company registry (Receita Federal), DuckDB + Parquet."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+dependencies = ["duckdb>=1.0", "mcp>=1.2,<2"]
+[project.optional-dependencies]
+ingest = ["pyarrow>=15"]
+[project.scripts]
+cnpj-mcp = "cnpj_mcp.cli:main"
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+[tool.setuptools.packages.find]
+where = ["src"]
