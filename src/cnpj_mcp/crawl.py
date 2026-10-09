@@ -18,6 +18,7 @@ from urllib.parse import urljoin, urlparse, parse_qs
 import httpx
 
 from .clean import br_number, wa_number, social_ok, landing_problem
+from . import ident as _ident
 
 UA = "cnpj-mcp-crawler/0.1 (+https://github.com/bnovarini/cnpj-mcp)"
 MAX_BYTES = 400_000
@@ -129,7 +130,7 @@ async def get(client, pacer, url, rp):
         return None, "error_" + type(e).__name__
 
 
-async def crawl_domain(client, pacer, dom, cnpj, sem):
+async def crawl_domain(client, pacer, dom, cnpj, sem, comps=None):
     async with sem:
         rec = {"domain": dom, "cnpj": cnpj, "status": None, "pages": [], "crawled_at": int(time.time())}
         found = {"whatsapp": {}, "phones": {}, "emails": {}, "social": {}}
@@ -172,6 +173,7 @@ async def crawl_domain(client, pacer, dom, cnpj, sem):
             return rec
         rec["pages"].append(final)
         merge(found, extract(html, final))
+        sigs = [_ident.page_signals(html)] if comps else []
         contact = None
         for href, label in HREF.findall(html):
             if CONTACT_HINT.search(href) or CONTACT_HINT.search(re.sub(r"<[^>]+>", " ", label)):
@@ -185,7 +187,12 @@ async def crawl_domain(client, pacer, dom, cnpj, sem):
             if res2:
                 rec["pages"].append(res2[0])
                 merge(found, extract(res2[1], res2[0]))
+                if comps:
+                    sigs.append(_ident.page_signals(res2[1]))
         rec["status"] = "ok"
+        if comps:
+            sg = _ident.combine(sigs)
+            rec["ident"] = {c["cnpj"]: dict(zip(("level", "evidence"), _ident.evaluate(sg, c))) for c in comps}
         rec.update({k: [{"value": v, "source_url": s} for v, s in d.items()] for k, d in found.items()})
         return rec
 
@@ -227,7 +234,7 @@ async def main(inp, outp, conc=40):
                     except asyncio.QueueEmpty:
                         return
                     try:
-                        rec = await asyncio.wait_for(crawl_domain(client, pacer, r[0], r[1] if len(r) > 1 else "", one), 45)
+                        rec = await asyncio.wait_for(crawl_domain(client, pacer, r[0], r[1] if len(r) > 1 else "", one, json.loads(r[2]) if len(r) > 2 and r[2] else None), 45)
                     except asyncio.TimeoutError:
                         rec = {"domain": r[0], "cnpj": r[1] if len(r) > 1 else "", "status": "timeout_total", "pages": [], "crawled_at": int(time.time())}
                     except Exception as e:
