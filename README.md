@@ -57,7 +57,7 @@ Signals, all computed from the Receita dump itself:
 
 The server reads the result from `website_contacts.parquet` (one row per domain) and adds a separate `website_contacts` block, labelled "from the company's own website", to `get_company` and to `search_companies` with `include_contacts`. It is matched to a company through the domain of its registered email, kept apart from Receita fields, and not part of `contact_score`.
 
-First sweep, October 2026: 724,996 corporate domains used by one to three companies. 420,058 sites (57.9%) loaded. Of those, 41% show a WhatsApp link, 57% a phone, 56% an email and 53% a social profile; 72% show at least one of WhatsApp, phone or email. The rest were unreachable (28% no DNS or connection), returned an error page, or were skipped because robots.txt asked bots to stay away (3.9%). Social handles can include generic paths such as `facebook:profile.php`. Refresh by rerunning the crawl on the new domain list.
+First sweep, October 2026: 724,996 corporate domains used by one to three companies. 420,058 sites (57.9%) loaded. Of those, 41% show a WhatsApp link, 57% a phone, 54% an email and 53% a social profile; 71% show at least one of WhatsApp, phone or email. The rest were unreachable (28% no DNS or connection), returned an error page, or were skipped because robots.txt asked bots to stay away (3.9%). Known placeholder and error-tracker email addresses are removed, but others can slip through. Social handles can include generic paths such as `facebook:profile.php`. Refresh by rerunning the crawl on the new domain list.
 
 ## Read this before quoting numbers
 
