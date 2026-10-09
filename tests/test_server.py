@@ -47,17 +47,20 @@ def test_counts_and_units(srv):
 
 def test_filters(srv):
     r = srv.search_companies(municipio="sinop", cnae=["01"], opened_from="2020-01")
-    assert [x["cnpj"] for x in r] == ["11111111000191"]
-    assert srv.search_companies(partner_name="maria silva")[0].get("message")  # words must be contiguous
-    assert srv.search_companies(partner_name="SILVA")[0]["razao_social"] == "SOJA SINOP LTDA"
-    assert srv.search_companies(natureza_juridica="limitada", capital_min=100000)[0]["porte"] == "demais"
+    assert [x["cnpj"] for x in r["companies"]] == ["11111111000191"]
+    assert r["pagination"] == {"has_more": False, "next_offset": None, "returned": 1}
+    assert srv.search_companies(partner_name="maria silva")["message"]  # words must be contiguous
+    assert srv.search_companies(partner_name="SILVA")["companies"][0]["razao_social"] == "SOJA SINOP LTDA"
+    assert srv.search_companies(natureza_juridica="limitada", capital_min=100000)["companies"][0]["porte"] == "demais"
+    p = srv.search_companies(limit=1)
+    assert len(p["companies"]) == 1 and p["pagination"]["has_more"] and p["pagination"]["next_offset"] == 1
 
 
 def test_company_partners_address(srv):
     c = srv.get_company("11.111.111/0001-91")
     assert c["estabelecimentos_total"] == 1 and c["socios"][0]["nome_socio"] == "MARIA DA SILVA"
     assert srv.get_company("00000000000000")["error"]
-    assert srv.search_partners("Maria da Silva", cpf_middle="123456")[0]["cnpj"] == "11111111000191"
+    assert srv.search_partners("Maria da Silva", cpf_middle="123456")["partners"][0]["cnpj"] == "11111111000191"
     a = srv.companies_at_address(cep="01000-000")
     assert a[0]["total_matching"] == 1
 
@@ -69,3 +72,16 @@ def test_validation(srv):
     with pytest.raises(ValueError):
         srv.count_companies(group_by=["uf", "porte", "mei"])
     assert srv.lookup_codes("cnae", "soja")[0]["codigo"] == "0115600"
+
+
+def test_contact_validation():
+    from cnpj_mcp.clean import br_number, wa_number, social_ok, landing_problem
+    assert br_number("5511993048465") == ("11993048465", "mobile")
+    assert br_number("011993048465") == ("11993048465", "mobile")  # stray leading zero
+    assert br_number("351931062752")[0] is None  # foreign
+    assert br_number("6282146654")[0] is None and br_number("1791506703")[0] is None  # text noise
+    assert br_number("11999999999")[0] is None and br_number("1234567890")[0] is None
+    assert wa_number("551187651234") == ("11987651234", "mobile")  # old mobile gets the ninth digit
+    assert not social_ok("facebook:profile.php") and not social_ok("instagram:reel") and social_ok("instagram:fivearq")
+    assert landing_problem("x.com.br", "https://static.uni5.net/indisponivel.php") == "parked_or_unavailable"
+    assert landing_problem("x.com.br", "https://www.x.com.br/") is None
