@@ -3,7 +3,7 @@ Usage: python -m cnpj_mcp.postprocess merged.jsonl out.parquet"""
 import collections, json, sys
 import duckdb
 from .clean import br_number, wa_number, social_ok, landing_problem
-from .crawl import JUNK_EMAIL
+from .crawl import JUNK_EMAIL, JUNK_EMAIL2
 
 SHARED_MIN = {"whatsapp": 25, "phones": 25, "emails": 25, "social": 10}  # distinct domains; beyond this a value belongs to a vendor, host or platform
 
@@ -33,7 +33,7 @@ def _clean_row(r, stats):
                 else:
                     stats["phones_drop_" + kind] += 1
             r["whatsapp"], r["phones"] = wa, ph
-            r["emails"] = [e for e in (r.get("emails") or []) if not JUNK_EMAIL.search(e["value"])]
+            r["emails"] = [e for e in (r.get("emails") or []) if not (JUNK_EMAIL.search(e["value"]) or JUNK_EMAIL2.search(e["value"]))]
             soc = r.get("social") or []
             r["social"] = [s for s in soc if social_ok(s["value"])]
             stats["social_generic_drop"] += len(soc) - len(r["social"])
