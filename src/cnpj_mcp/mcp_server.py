@@ -72,20 +72,50 @@ def _has_web() -> bool:
     return (data_dir() / "website_contacts.parquet").exists()
 
 
-def _web_blocks(emails: list) -> dict[str, dict]:
-    """Contacts found on each company's own website, keyed by email domain. Separate from Receita data and from the score."""
-    doms = sorted({e.split("@")[-1].strip().lower() for e in emails if e and "@" in e})
+def _has_ident() -> bool:
+    return (data_dir() / "website_ident.parquet").exists()
+
+
+MATCH_NOTES = {
+    "confirmed": "CONFIRMED site: the page itself ties this site to this company (CNPJ or its 8-digit root on the page, or the company name together with its registered CEP, phone or city). Evidence is in match_basis.",
+    "likely": "LIKELY site: the company name appears in the page title, heading or copyright line, but nothing else (CNPJ, CEP, registered phone) confirms it. Check before relying on it.",
+    "candidate": "CANDIDATE site, not confirmed: it is matched only through the domain of the registered email, which does not prove the site belongs to this company (a domain can be shared, resold or used by an unrelated business). Check that the business matches before using these contacts.",
+}
+EVIDENCE_TEXT = {"cnpj_on_page": "CNPJ or CNPJ root on the page", "phone": "registered phone on the page", "cep": "registered CEP on the page", "city": "registered city on the page",
+                 "name_multi_in_title/heading/copyright": "company name in title, heading or copyright", "name_single_in_title/heading/copyright": "distinctive single-word name in title, heading or copyright",
+                 "name_multi_in_body": "company name in page text", "name_single_in_body": "single-word name in page text"}
+
+
+def _web_blocks(pairs: list) -> dict[str, dict]:
+    """Contacts found on each company's own website, keyed by CNPJ. pairs = [(cnpj, email)]. The match level is per company: confirmed, likely or candidate. Separate from Receita data and from the score."""
+    em = {c: e.split("@")[-1].strip().lower() for c, e in pairs if c and e and "@" in e}
+    doms = sorted(set(em.values()))
     if not doms or not _has_web():
         return {}
     rows = run("SELECT domain, final_url, crawled_at, pages, whatsapp, phones, emails, social FROM wc WHERE status = 'ok' AND domain IN (" + ",".join("?" * len(doms)) + ")", doms)
+    by = {r["domain"]: r for r in rows}
+    ident = {}
+    if _has_ident() and by:
+        cs = sorted(em)
+        for r in run("SELECT domain, cnpj, level, evidence FROM wi WHERE domain IN (" + ",".join("?" * len(by)) + ")", list(by)):
+            ident[(r["domain"], r["cnpj"])] = r
     out = {}
-    for r in rows:
-        out[r["domain"]] = {
+    for c, d in em.items():
+        r = by.get(d)
+        if not r:
+            continue
+        i = ident.get((d, c))
+        level = i["level"] if i else "candidate"
+        if i and i["evidence"]:
+            basis = "; ".join(EVIDENCE_TEXT.get(x, x) for x in i["evidence"].split(";") if x)
+        else:
+            basis = "domain of the company's registered email" if not i else "nothing on the page ties the site to this company"
+        out[c] = {
             "source": "from the company's own website (public pages, robots.txt respected); not Receita data and not part of registry_contact_quality",
             "domain": r["domain"], "site": r["final_url"], "crawled_at": r["crawled_at"], "pages_read": r["pages"],
             "whatsapp": r["whatsapp"], "phones": r["phones"], "emails": r["emails"], "social_profiles": r["social"],
-            "match": "candidate", "match_basis": "domain of the company's registered email",
-            "note": "CANDIDATE site, not confirmed: it is matched only through the domain of the registered email, which does not prove the site belongs to this company (a domain can be shared, resold or used by an unrelated business). Check that the business on the site fits the company before using a contact. Each value carries the page it was found on (source_url). Phones and WhatsApp numbers are validated as Brazilian numbers; contacts shared by many sites and generic social links are removed."}
+            "match": level, "match_basis": basis, "note": MATCH_NOTES[level],
+        }
     return out
 
 
@@ -114,6 +144,8 @@ def con() -> duckdb.DuckDBPyConnection:
             c.execute(f"CREATE VIEW k AS SELECT * FROM read_parquet('{d}/est_cnpj/*.parquet')")
         if (d / "contact_score").is_dir():
             c.execute(f"CREATE VIEW cs AS SELECT * FROM read_parquet('{d}/contact_score/*.parquet')")
+        if (d / "website_ident.parquet").exists():
+            c.execute(f"CREATE VIEW wi AS SELECT * FROM read_parquet('{d}/website_ident.parquet')")
         if (d / "website_contacts.parquet").exists():
             c.execute(f"CREATE VIEW wc AS SELECT * FROM read_parquet('{d}/website_contacts.parquet')")
         if (d / "socios_nome.parquet").exists():
@@ -406,9 +438,9 @@ def search_companies(cnae: Optional[list[str]] = None, cnae_secao: Optional[str]
         if want_score:
             r["registry_contact_quality"] = _contact_block(sc.get(r["cnpj"]))
     if include_contacts:
-        wb = _web_blocks([r.get("email") for r in rows])
+        wb = _web_blocks([(r.get("cnpj"), r.get("email")) for r in rows])
         for r in rows:
-            b = wb.get((r.get("email") or "").split("@")[-1].strip().lower())
+            b = wb.get(r.get("cnpj"))
             if b:
                 r["website_contacts"] = b
     if more:
@@ -498,7 +530,7 @@ def get_company(cnpj: str) -> dict:
     sc = _scores([r["cnpj"]]).get(r["cnpj"])
     if sc:
         r["registry_contact_quality"] = _contact_block(sc)
-    wb = _web_blocks([r.get("email")])
+    wb = _web_blocks([(r.get("cnpj"), r.get("email"))])
     if wb:
         r["website_contacts"] = next(iter(wb.values()))
     r["socios"] = run("SELECT nome_socio, CASE identificador_socio WHEN 1 THEN 'pessoa juridica' WHEN 2 THEN 'pessoa fisica' ELSE 'estrangeiro' END AS tipo, "
