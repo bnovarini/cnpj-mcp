@@ -17,6 +17,8 @@ from urllib.parse import urljoin, urlparse, parse_qs
 
 import httpx
 
+from .clean import br_number, wa_number, social_ok, landing_problem
+
 UA = "cnpj-mcp-crawler/0.1 (+https://github.com/bnovarini/cnpj-mcp)"
 MAX_BYTES = 400_000
 PHONE = re.compile(r"(?<!\d)(?:\+?55\s?)?\(?(\d{2})\)?[\s.-]?(9?\d{4})[\s.-]?(\d{4})(?!\d)")
@@ -24,7 +26,7 @@ JUNK_EMAIL = re.compile(r"@([a-z0-9-]+\.)*(sentry(-next)?\.wixpress\.com|wixpres
 EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 SOCIAL = {
     "instagram": re.compile(r"https?://(?:www\.)?instagram\.com/([A-Za-z0-9._]{2,30})/?"),
-    "facebook": re.compile(r"https?://(?:www\.|pt-br\.|m\.)?facebook\.com/([A-Za-z0-9.\-_/]{2,80})"),
+    "facebook": re.compile(r"https?://(?:www\.|pt-br\.|m\.)?facebook\.com/(profile\.php\?id=\d+|[A-Za-z0-9.\-_/]{2,80})"),
     "linkedin": re.compile(r"https?://(?:[a-z]{2,3}\.)?linkedin\.com/(company|in)/([A-Za-z0-9\-_%]{2,80})"),
     "youtube": re.compile(r"https?://(?:www\.)?youtube\.com/(@[A-Za-z0-9._\-]{2,50}|channel/[A-Za-z0-9_\-]+|c/[A-Za-z0-9_\-]+)"),
     "tiktok": re.compile(r"https?://(?:www\.)?tiktok\.com/(@[A-Za-z0-9._]{2,40})"),
@@ -57,19 +59,21 @@ def extract(html, url):
     found = {"whatsapp": {}, "phones": {}, "emails": {}, "social": {}}
     text = unescape(re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", html, flags=re.S | re.I))
     for m in WA.finditer(html):
-        found["whatsapp"].setdefault(m.group(1), url)
+        n, _ = wa_number(m.group(1))
+        if n:
+            found["whatsapp"].setdefault("55" + n, url)
     for m in re.finditer(r"""href=["']tel:([^"']+)["']""", html, re.I):
-        d = re.sub(r"\D", "", m.group(1))
-        if 10 <= len(d) <= 13:
-            found["phones"].setdefault(d, url)
+        n, _ = br_number(m.group(1))
+        if n:
+            found["phones"].setdefault(n, url)
     plain = re.sub(r"<[^>]+>", " ", text)
     for m in PHONE.finditer(plain):
         ddd, a, b = m.groups()
         if ddd == "00" or ddd[0] == "0":
             continue
-        d = ddd + a + b
-        if len(set(d)) > 2:
-            found["phones"].setdefault(d, url)
+        n, _ = br_number(ddd + a + b)
+        if n:
+            found["phones"].setdefault(n, url)
     for m in EMAIL.finditer(html):
         e = m.group(0).lower().rstrip(".")
         if JUNK_EMAIL.search(e):
@@ -81,7 +85,8 @@ def extract(html, url):
             handle = "/".join(g for g in m.groups() if g).strip("/")
             if handle.split("/")[0].lower() in SOCIAL_SKIP:
                 continue
-            found["social"].setdefault(f"{name}:{handle}", url)
+            if social_ok(f"{name}:{handle}"):
+                found["social"].setdefault(f"{name}:{handle}", url)
             break
     return found
 
@@ -160,6 +165,10 @@ async def crawl_domain(client, pacer, dom, cnpj, sem):
             return rec
         final, html = res
         rec["final_url"] = final
+        prob = landing_problem(dom, final)
+        if prob:
+            rec["status"] = prob
+            return rec
         rec["pages"].append(final)
         merge(found, extract(html, final))
         contact = None
