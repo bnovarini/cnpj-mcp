@@ -51,11 +51,13 @@ Signals, all computed from the Receita dump itself:
 
 `contact_score` is the better of the email score and the phone score. `min_contact_score` on `search_companies` keeps only companies at or above a score; it filters after reading each page, so one call looks at most 2000 candidates and returns `next_offset` to continue. Rebuild with `python -m cnpj_mcp.scores <data_dir>` after each monthly build.
 
-## Company website crawl (experimental, not served yet)
+## Company website contacts (served as a separate block)
 
-`python -m cnpj_mcp.crawl domains.tsv out.jsonl` visits the websites behind corporate email domains and records what the company itself publishes: WhatsApp links, phones, emails and social profiles, each with the page it came from. It obeys robots.txt, identifies itself, makes at most one request per second per domain and reads at most the home page plus one contact page. These results come from the company's own site and are kept separate from Receita fields.
+`python -m cnpj_mcp.crawl domains.tsv out.jsonl` visits the websites behind corporate email domains and records what the company itself publishes: WhatsApp links, phones, emails and social profiles, each with the page it came from. It obeys robots.txt, identifies itself (`cnpj-mcp-crawler/0.1`), makes at most one request per second per domain and reads at most the home page plus one contact page. Cookies are not stored.
 
-On a sample of about 1,250 domains used by one to three companies, 60% of sites loaded, and 24% of sampled domains showed a WhatsApp link, 38% a phone, 34% an email and 31% a social profile.
+The server reads the result from `website_contacts.parquet` (one row per domain) and adds a separate `website_contacts` block, labelled "from the company's own website", to `get_company` and to `search_companies` with `include_contacts`. It is matched to a company through the domain of its registered email, kept apart from Receita fields, and not part of `contact_score`.
+
+First sweep, October 2026: 724,996 corporate domains used by one to three companies. 420,058 sites (57.9%) loaded. Of those, 41% show a WhatsApp link, 57% a phone, 56% an email and 53% a social profile; 72% show at least one of WhatsApp, phone or email. The rest were unreachable (28% no DNS or connection), returned an error page, or were skipped because robots.txt asked bots to stay away (3.9%). Social handles can include generic paths such as `facebook:profile.php`. Refresh by rerunning the crawl on the new domain list.
 
 ## Read this before quoting numbers
 
