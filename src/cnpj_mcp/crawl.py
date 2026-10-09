@@ -51,6 +51,8 @@ class Pacer:
 
 
 def extract(html, url):
+    # long unbroken runs (inline base64 images, minified blobs) make the email regex quadratic and can stall the whole event loop
+    html = re.sub(r"[A-Za-z0-9+/=_.%-]{150,}", " ", html)
     found = {"whatsapp": {}, "phones": {}, "emails": {}, "social": {}}
     text = unescape(re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", html, flags=re.S | re.I))
     for m in WA.finditer(html):
@@ -200,6 +202,8 @@ async def main(inp, outp, conc=40):
     count = 0
     async with httpx.AsyncClient(headers={"User-Agent": UA, "Accept-Language": "pt-BR,pt;q=0.9"}, timeout=httpx.Timeout(10, connect=10),
                                  follow_redirects=True, limits=limits, max_redirects=4, verify=False) as client:
+        import http.cookiejar
+        client.cookies.jar.set_policy(http.cookiejar.DefaultCookiePolicy(allowed_domains=[]))  # never store cookies: a shared jar grows with every domain and slows each request
         with open(outp, "a") as out:
             async def worker():
                 nonlocal count
@@ -213,6 +217,8 @@ async def main(inp, outp, conc=40):
                         rec = await asyncio.wait_for(crawl_domain(client, pacer, r[0], r[1] if len(r) > 1 else "", one), 45)
                     except asyncio.TimeoutError:
                         rec = {"domain": r[0], "cnpj": r[1] if len(r) > 1 else "", "status": "timeout_total", "pages": [], "crawled_at": int(time.time())}
+                    except Exception as e:
+                        rec = {"domain": r[0], "cnpj": r[1] if len(r) > 1 else "", "status": "error_" + type(e).__name__, "pages": [], "crawled_at": int(time.time())}
                     pacer.last.pop(r[0], None)
                     pacer.last.pop("www." + r[0], None)
                     out.write(json.dumps(rec, ensure_ascii=False) + "\n")
