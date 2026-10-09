@@ -5,6 +5,7 @@ DuckDB queries Parquet files directly. Values are kept in Portuguese exactly as 
 """
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -13,7 +14,7 @@ import threading
 import time
 from datetime import date
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import duckdb
 from mcp.server.fastmcp import FastMCP
@@ -80,10 +81,11 @@ def _web_blocks(emails: list) -> dict[str, dict]:
     out = {}
     for r in rows:
         out[r["domain"]] = {
-            "source": "from the company's own website (public pages, robots.txt respected); not Receita data and not part of contact_quality",
+            "source": "from the company's own website (public pages, robots.txt respected); not Receita data and not part of registry_contact_quality",
             "domain": r["domain"], "site": r["final_url"], "crawled_at": r["crawled_at"], "pages_read": r["pages"],
             "whatsapp": r["whatsapp"], "phones": r["phones"], "emails": r["emails"], "social_profiles": r["social"],
-            "note": "Each value carries the page it was found on (source_url). The site is matched to the company through the domain of its registered email; a few domains serve up to 3 companies."}
+            "match": "candidate", "match_basis": "domain of the company's registered email",
+            "note": "CANDIDATE site, not confirmed: it is matched only through the domain of the registered email, which does not prove the site belongs to this company (a domain can be shared, resold or used by an unrelated business). Check that the business on the site fits the company before using a contact. Each value carries the page it was found on (source_url). Phones and WhatsApp numbers are validated as Brazilian numbers; contacts shared by many sites and generic social links are removed."}
     return out
 
 
@@ -309,16 +311,42 @@ def dataset_info() -> dict:
             "group_by_options": sorted(GROUPS)}
 
 
+def _split_pages(key):
+    """Return {key: [rows], pagination: {...}} instead of a list whose last item is a control object."""
+    def deco(fn):
+        @functools.wraps(fn)
+        def inner(*a, **kw):
+            rows = fn(*a, **kw)
+            msg, pag = None, {"has_more": False, "next_offset": None}
+            out = []
+            for r in rows:
+                if r.get("truncated"):
+                    pag = {"has_more": True, "next_offset": r["next_offset"]}
+                    msg = r.get("message")
+                elif set(r) == {"message"}:
+                    msg = r["message"]
+                else:
+                    out.append(r)
+            pag["returned"] = len(out)
+            res = {key: out, "pagination": pag}
+            if msg:
+                res["message"] = msg
+            return res
+        return inner
+    return deco
+
+
 @mcp.tool(description="Find companies/establishments matching filters. " + FILTER_DOC + " Returns up to 100 rows per page, ordered by opening date (newest first) unless order_by is "
-                      "capital_social or razao_social. Use count_companies for 'how many' questions. Set include_contacts to add email, phones, full address and a contact_quality block (0-100 score of how likely the registered email/phone is a real direct contact, with the signals behind it) and, when the company's own website was crawled, a separate website_contacts block (WhatsApp, phones, emails, social profiles found on its public pages, each with source_url). "
-                      "min_contact_score keeps only companies at or above that score; it is applied after the page is read, so a call scans at most 2000 candidates and returns next_offset to continue.")
+                      "capital_social or razao_social. Use count_companies for 'how many' questions. Set include_contacts to add email, phones, full address and a registry_contact_quality block (0-100 score of how likely the REGISTERED email/phone from Receita is a real direct contact, with the signals behind it; it says nothing about the website) and, when the company's own website was crawled, a separate website_contacts block (WhatsApp, phones, emails, social profiles found on its public pages, each with source_url). "
+                      "min_contact_score keeps only companies whose REGISTERED contact (the email and phones on the Receita record, not the website) scores at or above it. Pass an integer 0-100, or a tier name: 'high' = 85, 'medium' = 50, 'low' = 0 (e.g. min_contact_score=50 or 'medium' for medium and high).  The filter is applied after the page is read, so a call scans at most 2000 candidates and returns pagination.next_offset to continue.")
+@_split_pages("companies")
 def search_companies(cnae: Optional[list[str]] = None, cnae_secao: Optional[str] = None, include_secondary: bool = False, uf: Optional[str] = None,
                      municipio: Optional[str] = None, municipio_codigo: Optional[str] = None, situacao: Optional[str] = None, matriz_only: bool = False,
                      porte: Optional[str] = None, natureza_juridica: Optional[str] = None, capital_min: Optional[float] = None, capital_max: Optional[float] = None,
                      opened_from: Optional[str] = None, opened_to: Optional[str] = None, closed_from: Optional[str] = None, closed_to: Optional[str] = None,
                      mei: Optional[bool] = None, simples: Optional[bool] = None, name_contains: Optional[str] = None, cep: Optional[str] = None,
                      partner_name: Optional[str] = None, order_by: str = "data_inicio_atividade", include_contacts: bool = False,
-                     min_contact_score: Optional[int] = None, limit: int = 25, offset: int = 0) -> list[dict]:
+                     min_contact_score: Optional[Union[int, str]] = None, limit: int = 25, offset: int = 0) -> dict:
     where, p = _filters(cnae, cnae_secao, include_secondary, uf, municipio, municipio_codigo, situacao, matriz_only, porte, natureza_juridica, capital_min,
                         capital_max, opened_from, opened_to, closed_from, closed_to, mei, simples, name_contains, cep, partner_name)
     orders = {"data_inicio_atividade": "e.data_inicio_atividade DESC NULLS LAST", "capital_social": "e.capital_social DESC NULLS LAST", "razao_social": "e.razao_social"}
@@ -326,8 +354,15 @@ def search_companies(cnae: Optional[list[str]] = None, cnae_secao: Optional[str]
         raise ValueError("order_by must be data_inicio_atividade, capital_social or razao_social")
     limit, offset = _page(limit, offset)
     if min_contact_score is not None:
-        if not isinstance(min_contact_score, int) or not 0 <= min_contact_score <= 100:
-            raise ValueError("min_contact_score must be an integer from 0 to 100")
+        tiers = {"low": 0, "medium": 50, "high": 85}
+        if isinstance(min_contact_score, str):
+            t = min_contact_score.strip().lower()
+            if t in tiers:
+                min_contact_score = tiers[t]
+            elif t.isdigit():
+                min_contact_score = int(t)
+        if isinstance(min_contact_score, bool) or not isinstance(min_contact_score, int) or not 0 <= min_contact_score <= 100:
+            raise ValueError("min_contact_score must be an integer from 0 to 100, or one of 'low' (0), 'medium' (50), 'high' (85)")
         if not _has_score():
             raise ValueError("The contact score table is not built on this server.")
     want_score = include_contacts or min_contact_score is not None
@@ -369,7 +404,7 @@ def search_companies(cnae: Optional[list[str]] = None, cnae_secao: Optional[str]
         r["situacao"] = SITUACAO_NOME.get(r.pop("situacao_cadastral"))
         r["porte"] = PORTE_NOME.get(r["porte"], r["porte"])
         if want_score:
-            r["contact_quality"] = _contact_block(sc.get(r["cnpj"]))
+            r["registry_contact_quality"] = _contact_block(sc.get(r["cnpj"]))
     if include_contacts:
         wb = _web_blocks([r.get("email") for r in rows])
         for r in rows:
@@ -462,7 +497,7 @@ def get_company(cnpj: str) -> dict:
         r["estabelecimentos_total"] = run("SELECT count(*) AS n FROM e WHERE cnpj_basico = ?", [base])[0]["n"]
     sc = _scores([r["cnpj"]]).get(r["cnpj"])
     if sc:
-        r["contact_quality"] = _contact_block(sc)
+        r["registry_contact_quality"] = _contact_block(sc)
     wb = _web_blocks([r.get("email")])
     if wb:
         r["website_contacts"] = next(iter(wb.values()))
@@ -484,7 +519,8 @@ def list_partners(cnpj: str) -> list[dict]:
 @mcp.tool(description="Find the companies a person or entity is a partner of, by name. Exact (accent-insensitive, case-insensitive) match on the partner name by default; "
                       "set contains=true for a substring match. Optionally narrow with cpf_middle (the 6 digits Receita publishes, e.g. '240659') because the same name "
                       "can belong to different people. Returns company name, status and role.")
-def search_partners(name: str, contains: bool = False, cpf_middle: Optional[str] = None, uf: Optional[str] = None, limit: int = 25, offset: int = 0) -> list[dict]:
+@_split_pages("partners")
+def search_partners(name: str, contains: bool = False, cpf_middle: Optional[str] = None, uf: Optional[str] = None, limit: int = 25, offset: int = 0) -> dict:
     if not name or len(name.strip()) < 4:
         raise ValueError("name must have at least 4 characters")
     w = ["strip_accents(s.nome_socio) ILIKE strip_accents(?) ESCAPE '\\'" if contains else "strip_accents(upper(s.nome_socio)) = strip_accents(upper(?))"]
