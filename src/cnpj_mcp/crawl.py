@@ -20,6 +20,7 @@ import httpx
 UA = "cnpj-mcp-crawler/0.1 (+https://github.com/bnovarini/cnpj-mcp)"
 MAX_BYTES = 400_000
 PHONE = re.compile(r"(?<!\d)(?:\+?55\s?)?\(?(\d{2})\)?[\s.-]?(9?\d{4})[\s.-]?(\d{4})(?!\d)")
+JUNK_EMAIL = re.compile(r"@([a-z0-9-]+\.)*(sentry(-next)?\.wixpress\.com|wixpress\.com|sentry\.io)$|^[0-9a-f]{24,}@|@(email|empresa|exemplo|example|domain|dominio|seudominio|seusite|seuemail|yourdomain|yoursite|site|nome|mail|test|teste|mysite|meusite|naoinformado|nomedosite|suaempresa|company|yourcompany)\.(com|com\.br|org|net|br)$|^(email|seuemail|seu-email|seunome|nome|exemplo|example|your|you|name|user|usuario|teste|test|naoinformado)@", re.I)
 EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 SOCIAL = {
     "instagram": re.compile(r"https?://(?:www\.)?instagram\.com/([A-Za-z0-9._]{2,30})/?"),
@@ -71,6 +72,8 @@ def extract(html, url):
             found["phones"].setdefault(d, url)
     for m in EMAIL.finditer(html):
         e = m.group(0).lower().rstrip(".")
+        if JUNK_EMAIL.search(e):
+            continue
         if not e.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".css", ".js")):
             found["emails"].setdefault(e, url)
     for name, rx in SOCIAL.items():
