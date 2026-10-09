@@ -67,6 +67,26 @@ def _contact_block(r: Optional[dict]) -> Optional[dict]:
                                   "phone2_kind": r["phone2_kind"], "companies_sharing_phone2": r["phone2_shared_companies"]}}}
 
 
+def _has_web() -> bool:
+    return (data_dir() / "website_contacts.parquet").exists()
+
+
+def _web_blocks(emails: list) -> dict[str, dict]:
+    """Contacts found on each company's own website, keyed by email domain. Separate from Receita data and from the score."""
+    doms = sorted({e.split("@")[-1].strip().lower() for e in emails if e and "@" in e})
+    if not doms or not _has_web():
+        return {}
+    rows = run("SELECT domain, final_url, crawled_at, pages, whatsapp, phones, emails, social FROM wc WHERE status = 'ok' AND domain IN (" + ",".join("?" * len(doms)) + ")", doms)
+    out = {}
+    for r in rows:
+        out[r["domain"]] = {
+            "source": "from the company's own website (public pages, robots.txt respected); not Receita data and not part of contact_quality",
+            "domain": r["domain"], "site": r["final_url"], "crawled_at": r["crawled_at"], "pages_read": r["pages"],
+            "whatsapp": r["whatsapp"], "phones": r["phones"], "emails": r["emails"], "social_profiles": r["social"],
+            "note": "Each value carries the page it was found on (source_url). The site is matched to the company through the domain of its registered email; a few domains serve up to 3 companies."}
+    return out
+
+
 def data_dir() -> Path:
     return Path(os.environ.get("CNPJ_DATA_DIR", str(Path.home() / ".cache" / "cnpj-mcp")))
 
@@ -92,6 +112,8 @@ def con() -> duckdb.DuckDBPyConnection:
             c.execute(f"CREATE VIEW k AS SELECT * FROM read_parquet('{d}/est_cnpj/*.parquet')")
         if (d / "contact_score").is_dir():
             c.execute(f"CREATE VIEW cs AS SELECT * FROM read_parquet('{d}/contact_score/*.parquet')")
+        if (d / "website_contacts.parquet").exists():
+            c.execute(f"CREATE VIEW wc AS SELECT * FROM read_parquet('{d}/website_contacts.parquet')")
         if (d / "socios_nome.parquet").exists():
             c.execute(f"CREATE VIEW sn AS SELECT * FROM read_parquet('{d}/socios_nome.parquet')")
         for t in ("cnaes", "municipios", "naturezas", "motivos", "paises", "qualificacoes"):
@@ -288,7 +310,7 @@ def dataset_info() -> dict:
 
 
 @mcp.tool(description="Find companies/establishments matching filters. " + FILTER_DOC + " Returns up to 100 rows per page, ordered by opening date (newest first) unless order_by is "
-                      "capital_social or razao_social. Use count_companies for 'how many' questions. Set include_contacts to add email, phones, full address and a contact_quality block (0-100 score of how likely the registered email/phone is a real direct contact, with the signals behind it). "
+                      "capital_social or razao_social. Use count_companies for 'how many' questions. Set include_contacts to add email, phones, full address and a contact_quality block (0-100 score of how likely the registered email/phone is a real direct contact, with the signals behind it) and, when the company's own website was crawled, a separate website_contacts block (WhatsApp, phones, emails, social profiles found on its public pages, each with source_url). "
                       "min_contact_score keeps only companies at or above that score; it is applied after the page is read, so a call scans at most 2000 candidates and returns next_offset to continue.")
 def search_companies(cnae: Optional[list[str]] = None, cnae_secao: Optional[str] = None, include_secondary: bool = False, uf: Optional[str] = None,
                      municipio: Optional[str] = None, municipio_codigo: Optional[str] = None, situacao: Optional[str] = None, matriz_only: bool = False,
@@ -348,6 +370,12 @@ def search_companies(cnae: Optional[list[str]] = None, cnae_secao: Optional[str]
         r["porte"] = PORTE_NOME.get(r["porte"], r["porte"])
         if want_score:
             r["contact_quality"] = _contact_block(sc.get(r["cnpj"]))
+    if include_contacts:
+        wb = _web_blocks([r.get("email") for r in rows])
+        for r in rows:
+            b = wb.get((r.get("email") or "").split("@")[-1].strip().lower())
+            if b:
+                r["website_contacts"] = b
     if more:
         rows.append({"truncated": True, "next_offset": (pos if min_contact_score is not None else offset + limit), "message": "More matches exist; raise offset or narrow filters."})
     if not rows:
@@ -435,6 +463,9 @@ def get_company(cnpj: str) -> dict:
     sc = _scores([r["cnpj"]]).get(r["cnpj"])
     if sc:
         r["contact_quality"] = _contact_block(sc)
+    wb = _web_blocks([r.get("email")])
+    if wb:
+        r["website_contacts"] = next(iter(wb.values()))
     r["socios"] = run("SELECT nome_socio, CASE identificador_socio WHEN 1 THEN 'pessoa juridica' WHEN 2 THEN 'pessoa fisica' ELSE 'estrangeiro' END AS tipo, "
                       "cnpj_cpf_socio, qualificacao_socio_descricao AS qualificacao, data_entrada, faixa_etaria, nome_representante FROM s WHERE cnpj_basico = ? "
                       "ORDER BY data_entrada LIMIT 100", [base])
