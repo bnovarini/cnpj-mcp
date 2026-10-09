@@ -40,7 +40,7 @@ Tools: `dataset_info`, `search_companies`, `count_companies`, `get_company`, `li
 
 ## Contact quality score
 
-`get_company` and `search_companies` (with `include_contacts`) return a `contact_quality` block: a 0-100 `contact_score`, a tier (high 85+, medium 50-84, low below 50) and the signals behind it. It estimates how likely the email or phone registered with Receita is a real, direct contact. It does not check that anyone answers.
+`get_company` and `search_companies` (with `include_contacts`) return a `registry_contact_quality` block: a 0-100 `contact_score`, a tier (high 85+, medium 50-84, low below 50) and the signals behind it. It estimates how likely the email or phone registered with Receita is a real, direct contact. It does not check that anyone answers.
 
 Signals, all computed from the Receita dump itself:
 
@@ -49,7 +49,7 @@ Signals, all computed from the Receita dump itself:
 - Whether the email matches the company name.
 - Phone type (mobile or landline; Receita often stores mobiles without the ninth digit) and how many companies share the phone.
 
-`contact_score` is the better of the email score and the phone score. `min_contact_score` on `search_companies` keeps only companies at or above a score; it filters after reading each page, so one call looks at most 2000 candidates and returns `next_offset` to continue. Rebuild with `python -m cnpj_mcp.scores <data_dir>` after each monthly build.
+`contact_score` is the better of the email score and the phone score. `min_contact_score` on `search_companies` takes an integer 0-100 or a tier name (`low` = 0, `medium` = 50, `high` = 85) and keeps only companies whose registered contact scores at or above it. It says nothing about the website. It filters after reading each page, so one call looks at most 2000 candidates and returns `pagination.next_offset` to continue. Rebuild with `python -m cnpj_mcp.scores <data_dir>` after each monthly build.
 
 ## Company website contacts (served as a separate block)
 
@@ -57,7 +57,9 @@ Signals, all computed from the Receita dump itself:
 
 The server reads the result from `website_contacts.parquet` (one row per domain) and adds a separate `website_contacts` block, labelled "from the company's own website", to `get_company` and to `search_companies` with `include_contacts`. It is matched to a company through the domain of its registered email, kept apart from Receita fields, and not part of `contact_score`.
 
-First sweep, October 2026: 724,996 corporate domains used by one to three companies. 420,058 sites (57.9%) loaded. Of those, 41% show a WhatsApp link, 57% a phone, 54% an email and 53% a social profile; 71% show at least one of WhatsApp, phone or email. The rest were unreachable (28% no DNS or connection), returned an error page, or were skipped because robots.txt asked bots to stay away (3.9%). Known placeholder and error-tracker email addresses are removed, but others can slip through. Social handles can include generic paths such as `facebook:profile.php`. Refresh by rerunning the crawl on the new domain list.
+First sweep, October 2026: 724,996 corporate domains used by one to three companies. 420,058 sites loaded (57.9%). After cleaning, 414,185 show contacts that can be used and 4,004 turned out to be parked or "site unavailable" pages (for example `static.uni5.net/indisponivel.php`) and 1,869 redirect to a social or login page; those return no contacts. Of the 414,185 usable sites, 40% show a WhatsApp link, 55% a phone, 54% an email and 51% a social profile; 70% show at least one of WhatsApp, phone or email. The rest were unreachable (28% no DNS or connection), returned an error page, or were skipped because robots.txt asked bots to stay away (3.9%).
+
+Cleaning (`python -m cnpj_mcp.postprocess merged.jsonl out.parquet`, also applied by the crawler): phones and WhatsApp numbers must be valid Brazilian numbers (real area code, 9-digit mobile or 8-digit landline, no repeated or sequential digits); stray leading zeros and the 55 prefix are normalised, old 8-digit mobiles get the ninth digit for WhatsApp, and foreign numbers are dropped. Placeholder and error-tracker emails are removed. Generic social paths (`profile.php`, `sharer.php`, `reel`, ...) and anything found on 10 or more different domains (social) or 25 or more (phones, WhatsApp, emails) are dropped, because they belong to a website builder, a host or a platform. The site is a candidate match only: it is found through the domain of the registered email, so the block carries `"match": "candidate"`. Refresh by rerunning the crawl on the new domain list.
 
 ## Read this before quoting numbers
 
@@ -84,3 +86,7 @@ Counts are reconciled to the source and to the government's own figures. See [do
 ## License
 
 MIT for the code. The data comes from Receita Federal's open-data program; check Receita's current terms for reuse.
+
+## Response shape
+
+`search_companies` and `search_partners` return `{"companies" | "partners": [...], "pagination": {"has_more", "next_offset", "returned"}, "message"?}`. The page is always only data rows; use `pagination.next_offset` as `offset` for the next call.
