@@ -92,3 +92,13 @@ MIT for the code. The data comes from Receita Federal's open-data program; check
 ## Response shape
 
 `search_companies` and `search_partners` return `{"companies" | "partners": [...], "pagination": {"has_more", "next_offset", "returned"}, "message"?}`. The page is always only data rows; use `pagination.next_offset` as `offset` for the next call.
+
+## Usage logging
+
+The hosted server keeps a small usage log, with no personal data and no query contents. For each initialize and tool call it stores: UTC timestamp, event, tool name, and the client name and version the client sends in the MCP initialize handshake. No IP addresses, arguments or results are stored. It is a SQLite table (`/data/usage.db`) on the same machine. Set `CNPJ_USAGE_LOG=0` to turn it off.
+
+Read the stats from the machine (the number is the window in days, default 30):
+
+```
+fly ssh console -a cnpj-mcp -C "python -m cnpj_mcp.usage 30"
+```
