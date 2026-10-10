@@ -1,7 +1,7 @@
 """Privacy-first usage logging: one row per tool call or client handshake, kept in a local SQLite file.
 
-Stored: UTC timestamp, event ("initialize" or "tool_call"), tool name, client name and version from the MCP initialize handshake,
-and the product token of the User-Agent header. Not stored: arguments, query text, results, IP addresses or any identifier.
+Stored: UTC timestamp, event ("initialize" or "tool_call"), tool name, client name and version from the MCP initialize handshake.
+Not stored: arguments, query text, results, IP addresses, User-Agent or any identifier.
 Tool calls are tied to a client name through a short-lived in-memory map (never written to disk) because the server is stateless.
 
 Read the stats on the machine:  python -m cnpj_mcp.usage [days]
@@ -65,7 +65,7 @@ class UsageLog:
         try:
             msgs = json.loads(body)
             msgs = msgs if isinstance(msgs, list) else [msgs]
-            ua = _clean(dict(scope["headers"]).get(b"user-agent", b"").decode("latin-1").split(" ")[0], 40)
+            ua = ""  # the User-Agent is used only for the in-memory client key above, never stored
             key, now, rows = self._key(scope), time.time(), []
             ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
             for m in msgs:
