@@ -11,6 +11,7 @@ primary_region = "iad"
   CNPJ_THREADS = "2"
   CNPJ_QUERY_TIMEOUT = "40"
   CNPJ_RATE_PER_MIN = "40"
+  CNPJ_USAGE_DB = "/data/usage.db"
 
 [mounts]
   source = "cnpjdata"
