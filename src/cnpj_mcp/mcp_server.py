@@ -19,6 +19,8 @@ from typing import Any, Optional, Union
 import duckdb
 from mcp.server.fastmcp import FastMCP
 
+from . import wa
+
 MAX_ROWS = 100
 STREET_TYPES = {"AV": "AVENIDA", "AVENIDA": "AVENIDA", "R": "RUA", "RUA": "RUA", "AL": "ALAMEDA", "ALAMEDA": "ALAMEDA", "TV": "TRAVESSA", "TRAV": "TRAVESSA",
                 "TRAVESSA": "TRAVESSA", "ROD": "RODOVIA", "RODOVIA": "RODOVIA", "EST": "ESTRADA", "ESTR": "ESTRADA", "ESTRADA": "ESTRADA", "PC": "PRACA",
@@ -369,7 +371,7 @@ def _split_pages(key):
 
 
 @mcp.tool(description="Find companies/establishments matching filters. " + FILTER_DOC + " Returns up to 100 rows per page, ordered by opening date (newest first) unless order_by is "
-                      "capital_social or razao_social. Use count_companies for 'how many' questions. Set include_contacts to add email, phones, full address and a registry_contact_quality block (0-100 score of how likely the REGISTERED email/phone from Receita is a real direct contact, with the signals behind it; it says nothing about the website) and, when the company's own website was crawled, a separate website_contacts block (WhatsApp, phones, emails, social profiles found on its public pages, each with source_url). "
+                      "capital_social or razao_social. Use count_companies for 'how many' questions. Set include_contacts to add email, phones, full address and a registry_contact_quality block (0-100 score of how likely the REGISTERED email/phone from Receita is a real direct contact, with the signals behind it; it says nothing about the website) and, when the company's own website was crawled, a separate website_contacts block (WhatsApp, phones, emails, social profiles found on its public pages, each with source_url). A whatsapp_business block appears only when a WhatsApp Business account was found on one of the registered phones (display name, account type, name_match score, checked_at); phones are checked in the background after a query shows them, so a result can appear on a later call, and its absence says nothing about whether the number is on WhatsApp. "
                       "min_contact_score keeps only companies whose REGISTERED contact (the email and phones on the Receita record, not the website) scores at or above it. Pass an integer 0-100, or a tier name: 'high' = 85, 'medium' = 50, 'low' = 0 (e.g. min_contact_score=50 or 'medium' for medium and high).  The filter is applied after the page is read, so a call scans at most 2000 candidates and returns pagination.next_offset to continue.")
 @_split_pages("companies")
 def search_companies(cnae: Optional[list[str]] = None, cnae_secao: Optional[str] = None, include_secondary: bool = False, uf: Optional[str] = None,
@@ -443,6 +445,7 @@ def search_companies(cnae: Optional[list[str]] = None, cnae_secao: Optional[str]
             b = wb.get(r.get("cnpj"))
             if b:
                 r["website_contacts"] = b
+        wa.enrich_rows(rows)
     if more:
         rows.append({"truncated": True, "next_offset": (pos if min_contact_score is not None else offset + limit), "message": "More matches exist; raise offset or narrow filters."})
     if not rows:
@@ -533,6 +536,7 @@ def get_company(cnpj: str) -> dict:
     wb = _web_blocks([(r.get("cnpj"), r.get("email"))])
     if wb:
         r["website_contacts"] = next(iter(wb.values()))
+    wa.enrich_rows([r])
     r["socios"] = run("SELECT nome_socio, CASE identificador_socio WHEN 1 THEN 'pessoa juridica' WHEN 2 THEN 'pessoa fisica' ELSE 'estrangeiro' END AS tipo, "
                       "cnpj_cpf_socio, qualificacao_socio_descricao AS qualificacao, data_entrada, faixa_etaria, nome_representante FROM s WHERE cnpj_basico = ? "
                       "ORDER BY data_entrada LIMIT 100", [base])
