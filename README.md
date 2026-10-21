@@ -108,3 +108,34 @@ fly ssh console -a cnpj-mcp -C "python -m cnpj_mcp.usage 30"
 Hosted queries use one bounded worker and a 10-second request query budget by default (`CNPJ_QUERY_TIMEOUT`). Concurrent expensive requests get a retry message instead of an unbounded queue; health and dataset metadata stay responsive. Interrupted queries return an error, not partial results.
 
 Company-name substring filters require `uf` and 3-256 characters. Partner substring searches also require `uf` and retain their existing minimum name length. Nationwide substring name scans are not supported. Narrow by state, activity or date range after a timeout. There is no new index, sidecar or hidden scan cap.
+
+### Optional PostHog observability
+
+HTTP serving can export request-level tool spans and scrubbed error events with
+`CNPJ_POSTHOG_TOKEN` set in the server's secret store. No token means no export.
+`CNPJ_POSTHOG_HOST` defaults to `https://us.i.posthog.com`; EU projects can use
+`https://eu.i.posthog.com`. Keep project tokens out of source and config files.
+
+Only tool name, status, duration and known client name/version are exported.
+Error events retain the SDK-generated anonymous ID but do not create person
+profiles. No arguments, filter values, query text, results, caller IP/User-Agent,
+sessions, raw exception messages, stack traces or local variables are exported.
+Errors use a built-in type or `ToolError` and a fixed message. Handshakes and
+health checks are not exported. Batch calls share their request duration/status.
+Client name/version are sanitized client-supplied labels, not verified identities.
+PostHog still sees the server's egress IP and SDK User-Agent at transport level.
+
+The exporter uses bounded asynchronous queues. Graceful ASGI shutdown attempts a
+final flush; abrupt termination or network failures can lose telemetry. Existing
+SQLite usage logging remains independent. Export failures do not change tool
+responses. No broad auto-instrumentation or exception autocapture is enabled.
+
+Set and verify product billing limits before relying on a zero-cost cap. HTTP
+200 acceptance from ingestion does not prove an event appears in the project UI.
+Use synthetic safe requests to check both tracing and error tracking after setup.
+
+Run `pytest tests/test_observability.py` for offline SDK wire-privacy and response
+transparency checks. `tests/compare_http_responses.py CHECKOUT [enabled]`, with
+`CNPJ_DATA_DIR` pointing to the same test dataset, snapshots all eight HTTP tool
+responses. The optional `enabled` argument uses dummy credentials and intercepted
+network transport; it does not send telemetry.
