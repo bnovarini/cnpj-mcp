@@ -54,7 +54,7 @@ def test_actual_sdk_wire_has_no_identity_arguments_or_messages(wire):
                 for span in scope["spans"]:
                     assert span["name"] == "count_companies"
                     assert not span.get("events")
-                    assert {x["key"] for x in span["attributes"]} == {"tool", "status", "duration_ms", "client_name", "client_version"}
+                    assert {x["key"] for x in span["attributes"]} == {"tool", "status", "duration_ms", "client_name", "client_version", "error_class", "upstream", "upstream_ms", "db_ms", "local_ms", "argument_names", "result_bucket", "cache", "app_version", "deploy_version", "utc_hour"}
 
 
 def test_scrubbers_rebuild_allowlist():
