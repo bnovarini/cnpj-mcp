@@ -9,6 +9,7 @@ Read the stats on the machine:  python -m cnpj_mcp.usage [days]
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -44,8 +45,9 @@ def _clean(s, n=64) -> str:
 
 
 class UsageLog:
-    def __init__(self, app, tool_names):
+    def __init__(self, app, tool_names, observer=None, record_local=True):
         self.app, self.tools, self.seen = app, set(tool_names), {}
+        self.observer, self.record_local = observer, record_local
         self.salt = os.urandom(16)  # in-memory only, so the map cannot be reversed or persisted
 
     def _key(self, scope) -> str:
@@ -63,6 +65,15 @@ class UsageLog:
             pass  # logging must never break a request
 
     async def __call__(self, scope, receive, send):
+        if scope["type"] == "lifespan" and self.observer:
+            async def lifecycle_send(message):
+                if message["type"] == "lifespan.shutdown.complete":
+                    try:
+                        await asyncio.to_thread(self.observer.shutdown)
+                    except Exception:
+                        pass
+                await send(message)
+            return await self.app(scope, receive, lifecycle_send)
         if scope["type"] != "http" or scope["method"] != "POST" or scope["path"] == "/healthz":
             return await self.app(scope, receive, send)
         chunks, more = [], True
@@ -110,10 +121,11 @@ class UsageLog:
                 buf.append(message.get("body", b""))
             await send(message)
 
-        t0, outcome = time.time(), None
+        t0, outcome, error_type = time.time(), None, None
         try:
             await self.app(scope, replay, cap)
-        except BaseException:
+        except BaseException as exc:
+            error_type = type(exc).__name__
             outcome = "exception"
             raise
         finally:
@@ -134,8 +146,10 @@ class UsageLog:
                         outcome = "rpc_error"
                     else:
                         outcome = "ok"
-                if rows:
+                if rows and self.record_local:
                     self._record(rows, dur, outcome)
+                if rows and self.observer:
+                    self.observer.record(rows, t0, dur, outcome, error_type)
             except Exception:
                 pass
 
