@@ -152,3 +152,12 @@ failure does not disable the existing tracing/error export.
 Logs/Tracing share the free ingestion allowance; verify the Logs billing limit
 before enabling. Keep default retention unless intentionally accepting retention
 charges, which are not covered by ingestion billing limits.
+
+Tool telemetry also carries fixed diagnostic context: exception-class error codes,
+schema-checked argument names (no values), result-size buckets, measured local DB
+time and remaining request time, UTC hour, app version and an optional validated
+`CNPJ_DEPLOY_VERSION` build ID. CNPJ reads local DuckDB/Parquet: no live upstream
+requests (`upstream_ms=0`) and no application result cache (`cache=not_applicable`).
+`upstream=DB` means DB work was used, not proof the DB caused a failure. Batch
+calls share request timing/outcome. Unknown or incomplete results stay `unknown`.
+These are properties on existing spans/errors/logs, not extra analytics events.
