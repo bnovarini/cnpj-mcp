@@ -102,3 +102,9 @@ Read the stats from the machine (the number is the window in days, default 30):
 ```
 fly ssh console -a cnpj-mcp -C "python -m cnpj_mcp.usage 30"
 ```
+
+## Query safety
+
+Hosted queries use one bounded worker and a 10-second request query budget by default (`CNPJ_QUERY_TIMEOUT`). Concurrent expensive requests get a retry message instead of an unbounded queue; health and dataset metadata stay responsive. Interrupted queries return an error, not partial results.
+
+Company-name substring filters require `uf` and 3-256 characters. Partner substring searches also require `uf` and retain their existing minimum name length. Nationwide substring name scans are not supported. Narrow by state, activity or date range after a timeout. There is no new index, sidecar or hidden scan cap.
