@@ -788,9 +788,13 @@ def http_app():
         return JSONResponse({"ok": True, "snapshot": meta().get("month")})
 
     app = RateLimit(mcp.streamable_http_app(), int(os.environ.get("CNPJ_RATE_PER_MIN", "60")))
-    if os.environ.get("CNPJ_USAGE_LOG", "1") != "0":
+    from .observability import from_env
+    tools = [t.name for t in mcp._tool_manager.list_tools()]
+    observer = from_env(tools)
+    record_local = os.environ.get("CNPJ_USAGE_LOG", "1") != "0"
+    if record_local or observer:
         from .usage import UsageLog
-        app = UsageLog(app, [t.name for t in mcp._tool_manager.list_tools()])
+        app = UsageLog(app, tools, observer=observer, record_local=record_local)
     return app
 
 
