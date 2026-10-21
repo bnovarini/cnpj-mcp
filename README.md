@@ -172,3 +172,34 @@ This supports aggregate tool/client mix, empty-result rate, filter-name adoption
 and latency trends, not user retention, sessions, sequences or funnels.
 It adds event volume; verify the Product Analytics billing cap before enabling.
 Without the flag, existing diagnostic telemetry behavior is unchanged.
+
+### Application metrics (off by default)
+
+`CNPJ_POSTHOG_METRICS=1` opts into PostHog Application metrics (open alpha).
+Do not enable in production until project price, quota and a hard billing cap
+are verified. No Metrics free tier, price or cap is established by the public
+docs; alpha retention is 30 days. The flag defaults to off.
+
+Manual fixed-name metrics, independent of Logs and Analytics flags:
+- `cnpj.tool.calls`: counter, known tool and fixed outcome only.
+- `cnpj.tool.duration`: histogram of **upper-bound bucket values**, not exact
+  durations: 100, 500, 1000, 5000, 10000 or 10001 ms (overflow sentinel).
+  SDK histogram wire boundaries are its fixed defaults, not custom boundaries.
+  Quantiles are bucket approximations; overflow means >10s, not exactly 10001ms.
+- `cnpj.worker.busy`: 0/1 gauge sampled every 60 seconds, including idle.
+  A snapshot can miss short work. It is not average occupancy or a utilization SLO.
+- `cnpj.worker.rejected`: counter from the actual single-worker rejection branch.
+  No fictional queue-depth metric; this service rejects rather than queues scans.
+
+No memory metric in this prototype. Optional memory monitoring was deferred.
+At most 66 series: 8 tools x 7 outcomes, 8 tool histograms, busy and rejections.
+Unknown tools/statuses are dropped rather than making a new series. SDK guard
+is 66 series/window, 60-second flush, in-memory aggregation, bounded retries.
+Actual wire tests confirm no identity, client labels, MCP arguments/results,
+IP/UA, host/PID, exemplar or trace IDs. Resource attributes are fixed service
+name plus SDK name/version. Server transport IP/exporter UA remain visible to
+the receiving service, as with existing exporters.
+
+Sampler stops and last aggregate flushes on graceful shutdown; abrupt kill can
+lose a window. SDK retries are at-least-once and may duplicate a delta after an
+ambiguous network failure. No wizard, auto-instrumentation or scraping agent.
