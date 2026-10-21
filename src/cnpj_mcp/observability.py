@@ -47,9 +47,16 @@ def scrub_event(event):
 
 
 class Observability:
-    def __init__(self, token, tools, host="https://us.i.posthog.com"):
+    def __init__(self, token, tools, host="https://us.i.posthog.com", logs=False):
         from posthog import Posthog
         self.tools = frozenset(tools)
+        self.logs = None
+        if logs:
+            try:
+                from .telemetry_logs import ToolLogs
+                self.logs = ToolLogs(token, self.tools, host)
+            except Exception:
+                pass  # A log exporter failure must not disable existing telemetry.
         self.client = Posthog(
             token, host=host, disable_geoip=True, enable_exception_autocapture=False,
             capture_exception_code_variables=False, enable_local_evaluation=False,
@@ -71,6 +78,11 @@ class Observability:
             tool = row[2] if row[2] in self.tools else "(unknown)"
             values = _metadata(dict(tool=tool, status=status, duration_ms=duration,
                                     client_name=row[3], client_version=row[4]))
+            if self.logs:
+                try:
+                    self.logs.record(values)
+                except Exception:
+                    pass
             span = self.client.start_span(tool, start_time=started)
             span.set_attributes(values)
             span.set_status("ok" if status == "ok" else "error")
@@ -82,7 +94,11 @@ class Observability:
                     "$exception_list": [{"type": typ, "value": MESSAGE}]})
 
     def shutdown(self):
-        self.client.shutdown()
+        try:
+            self.client.shutdown()
+        finally:
+            if self.logs:
+                self.logs.shutdown()
 
 
 def from_env(tools):
@@ -93,6 +109,6 @@ def from_env(tools):
     if host not in {"https://us.i.posthog.com", "https://eu.i.posthog.com"}:
         return None
     try:
-        return Observability(token, tools, host)
+        return Observability(token, tools, host, logs=os.environ.get("CNPJ_POSTHOG_LOGS") == "1")
     except Exception:
         return None  # Telemetry must never prevent serving queries.
