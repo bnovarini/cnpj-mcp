@@ -65,7 +65,7 @@ def scrub_event(event):
 
 
 class Observability:
-    def __init__(self, token, tools, host="https://us.i.posthog.com", logs=False, analytics=False):
+    def __init__(self, token, tools, host="https://us.i.posthog.com", logs=False, analytics=False, metrics=False):
         from posthog import Posthog
         self.tools = frozenset(tools)
         self.schemas = tools if isinstance(tools, dict) else {}
@@ -79,15 +79,21 @@ class Observability:
                 self.logs = ToolLogs(token, self.tools, host)
             except Exception:
                 pass  # A log exporter failure must not disable existing telemetry.
+        self.metrics = None
         self.client = Posthog(
             token, host=host, disable_geoip=True, enable_exception_autocapture=False,
             capture_exception_code_variables=False, enable_local_evaluation=False,
             before_send=self._before_send, max_queue_size=256, flush_interval=2,
             timeout=2, max_retries=0,
+            metrics={"service_name": "cnpj-mcp", "flush_interval": 60, "max_series_per_flush": 66} if metrics else None,
             traces={"service_name": "cnpj-mcp", "before_span_send": scrub_span,
                     "resource_attributes": {"os.name": None, "os.version": None},
                     "max_queue_size": 256, "max_export_batch_size": 64, "flush_interval": 2},
         )
+
+        if metrics:
+            from .application_metrics import ApplicationMetrics
+            self.metrics = ApplicationMetrics(self.client, self.tools)
 
     def _before_send(self, event):
         if self.analytics and event.get("event") == "tool_called":
@@ -122,6 +128,8 @@ class Observability:
                           result_bucket=measured.get("result_bucket", "unknown"), cache="not_applicable",
                           app_version=self.app_version, deploy_version=self.deploy_version,
                           utc_hour=datetime.fromtimestamp(started, timezone.utc).hour)
+            if self.metrics:
+                self.metrics.record(tool, status, duration)
             if self.analytics:
                 from .product_analytics import duration_bucket
                 self.client.capture("tool_called", properties={
@@ -146,6 +154,8 @@ class Observability:
 
     def shutdown(self):
         try:
+            if self.metrics:
+                self.metrics.shutdown()
             self.client.shutdown()
         finally:
             if self.logs:
@@ -160,6 +170,6 @@ def from_env(tools):
     if host not in {"https://us.i.posthog.com", "https://eu.i.posthog.com"}:
         return None
     try:
-        return Observability(token, tools, host, logs=os.environ.get("CNPJ_POSTHOG_LOGS") == "1", analytics=os.environ.get("CNPJ_POSTHOG_ANALYTICS") == "1")
+        return Observability(token, tools, host, logs=os.environ.get("CNPJ_POSTHOG_LOGS") == "1", analytics=os.environ.get("CNPJ_POSTHOG_ANALYTICS") == "1", metrics=os.environ.get("CNPJ_POSTHOG_METRICS") == "1")
     except Exception:
         return None  # Telemetry must never prevent serving queries.
