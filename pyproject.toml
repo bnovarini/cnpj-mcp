@@ -5,7 +5,7 @@ description = "MCP server for analytical queries over Brazil's open CNPJ company
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
-dependencies = ["duckdb>=1.0", "mcp>=1.2,<2"]
+dependencies = ["duckdb>=1.0", "mcp>=1.2,<2", "posthog==7.75.0"]
 [project.optional-dependencies]
 ingest = ["pyarrow>=15"]
 [project.scripts]
