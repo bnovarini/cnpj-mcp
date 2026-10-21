@@ -139,3 +139,16 @@ transparency checks. `tests/compare_http_responses.py CHECKOUT [enabled]`, with
 `CNPJ_DATA_DIR` pointing to the same test dataset, snapshots all eight HTTP tool
 responses. The optional `enabled` argument uses dummy credentials and intercepted
 network transport; it does not send telemetry.
+
+Optional structured Logs export is separately gated by `CNPJ_POSTHOG_LOGS=1`.
+It uses the same secret and region, sending OTLP/protobuf to `/i/v1/logs`.
+Only fixed tool-completion/failure messages, severity, timestamp and the same
+allowlisted tool metadata are emitted. No root handler is installed: uvicorn
+access logs, DuckDB logs and all arbitrary Python log messages are excluded.
+No ambient trace/person/session context or host/process resource discovery is
+used. Logs queues are bounded and flushed on graceful shutdown. Logs export
+failure does not disable the existing tracing/error export.
+
+Logs/Tracing share the free ingestion allowance; verify the Logs billing limit
+before enabling. Keep default retention unless intentionally accepting retention
+charges, which are not covered by ingestion billing limits.
