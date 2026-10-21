@@ -161,3 +161,14 @@ requests (`upstream_ms=0`) and no application result cache (`cache=not_applicabl
 `upstream=DB` means DB work was used, not proof the DB caused a failure. Batch
 calls share request timing/outcome. Unknown or incomplete results stay `unknown`.
 These are properties on existing spans/errors/logs, not extra analytics events.
+
+Aggregate Product Analytics is separately opt-in with `CNPJ_POSTHOG_ANALYTICS=1`.
+It adds one `tool_called` event per completed HTTP tool call: tool, status,
+duration bucket, measured result bucket, schema-checked argument names and known
+client name/version. It retains a fresh SDK-generated anonymous ID per event,
+with person profiles and GeoIP disabled. No values, query text, raw results,
+errors, sessions, client IP/User-Agent or inherited identity are exported.
+This supports aggregate tool/client mix, empty-result rate, filter-name adoption
+and latency trends, not user retention, sessions, sequences or funnels.
+It adds event volume; verify the Product Analytics billing cap before enabling.
+Without the flag, existing diagnostic telemetry behavior is unchanged.
