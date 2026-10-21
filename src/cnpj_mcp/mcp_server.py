@@ -4,6 +4,7 @@ Data: Receita Federal "Dados Abertos do CNPJ" monthly dump (every establishment,
 DuckDB queries Parquet files directly. Values are kept in Portuguese exactly as Receita publishes them.
 """
 from __future__ import annotations
+from .error_triage import ExpectedValidationError, WorkerBusyError
 
 import asyncio
 import concurrent.futures
@@ -198,9 +199,9 @@ def _name_guard(name: Optional[str], uf: Optional[str]) -> None:
     if name is None:
         return
     if not 3 <= len(name.strip()) <= 256:
-        raise ValueError("name_contains must have 3 to 256 characters. Use a distinctive part of the company name.")
+        raise ExpectedValidationError("name_contains must have 3 to 256 characters. Use a distinctive part of the company name.")
     if not uf:
-        raise ValueError("Name substring searches require a state (uf), for example RJ. Add uf and retry; nationwide name substring scans are not supported.")
+        raise ExpectedValidationError("Name substring searches require a state (uf), for example RJ. Add uf and retry; nationwide name substring scans are not supported.")
 
 
 # ---------------- codes and filters ----------------
@@ -229,7 +230,7 @@ def _d(v: Optional[str], name: str, end: bool = False) -> Optional[str]:
     if v is None or v == "":
         return None
     if not re.fullmatch(r"\d{4}-\d{2}(-\d{2})?", v):
-        raise ValueError(f"{name} must be YYYY-MM-DD or YYYY-MM, got {v!r}")
+        raise ExpectedValidationError(f"{name} must be YYYY-MM-DD or YYYY-MM, got {v!r}")
     try:
         if len(v) == 7:
             import calendar
@@ -240,14 +241,14 @@ def _d(v: Optional[str], name: str, end: bool = False) -> Optional[str]:
             return v + "-01"
         date.fromisoformat(v)
     except ValueError:
-        raise ValueError(f"{name} is not a real date: {v!r}")
+        raise ExpectedValidationError(f"{name} is not a real date: {v!r}")
     return v
 
 
 def _digits(v: str, name: str, lo: int, hi: int) -> str:
     x = re.sub(r"\D", "", v or "")
     if not (lo <= len(x) <= hi):
-        raise ValueError(f"{name} must have {lo}-{hi} digits, got {v!r}")
+        raise ExpectedValidationError(f"{name} must have {lo}-{hi} digits, got {v!r}")
     return x
 
 
@@ -268,7 +269,7 @@ def _filters(cnae=None, cnae_secao=None, include_secondary=False, uf=None, munic
     if cnae:
         items = [cnae] if isinstance(cnae, str) else list(cnae)
         if len(items) > 20:
-            raise ValueError("cnae takes at most 20 codes")
+            raise ExpectedValidationError("cnae takes at most 20 codes")
         parts = []
         for it in items:
             x = _digits(str(it), "cnae", 2, 7)
@@ -279,12 +280,12 @@ def _filters(cnae=None, cnae_secao=None, include_secondary=False, uf=None, munic
     if cnae_secao:
         sx = cnae_secao.upper().strip()
         if sx not in SECOES:
-            raise ValueError("cnae_secao must be a CNAE section letter A-U")
+            raise ExpectedValidationError("cnae_secao must be a CNAE section letter A-U")
         w.append("e.cnae_secao = ?"); p.append(sx)
     if uf:
         u = uf.upper().strip()
         if u not in UFS:
-            raise ValueError(f"uf must be a two-letter state code (or EX for abroad), got {uf!r}")
+            raise ExpectedValidationError(f"uf must be a two-letter state code (or EX for abroad), got {uf!r}")
         w.append("e.uf = ?"); p.append(u)
     if municipio_codigo:
         w.append("e.municipio_codigo = ?"); p.append(_digits(municipio_codigo, "municipio_codigo", 1, 4).zfill(4))
@@ -297,7 +298,7 @@ def _filters(cnae=None, cnae_secao=None, include_secondary=False, uf=None, munic
         elif k.zfill(2) in SITUACAO_NOME:
             code = k.zfill(2)
         else:
-            raise ValueError("situacao must be one of: ativa, baixada, suspensa, inapta, nula")
+            raise ExpectedValidationError("situacao must be one of: ativa, baixada, suspensa, inapta, nula")
         w.append("e.situacao_cadastral = ?"); p.append(code)
     if matriz_only or unit == "empresas":
         w.append("e.matriz_filial = 1")
@@ -306,7 +307,7 @@ def _filters(cnae=None, cnae_secao=None, include_secondary=False, uf=None, munic
         k = {"me": "micro", "microempresa": "micro", "epp": "pequeno", "pequeno porte": "pequeno", "empresa de pequeno porte": "pequeno"}.get(k, k)
         code = PORTE.get(k) or (k if k in PORTE_NOME else None)
         if not code:
-            raise ValueError("porte must be one of: micro (ME), pequeno (EPP), demais, nao_informado")
+            raise ExpectedValidationError("porte must be one of: micro (ME), pequeno (EPP), demais, nao_informado")
         w.append("e.porte = ?"); p.append(code)
     if natureza_juridica:
         x = natureza_juridica.strip()
@@ -321,7 +322,7 @@ def _filters(cnae=None, cnae_secao=None, include_secondary=False, uf=None, munic
     for col, a, b in (("data_inicio_atividade", opened_from, opened_to), ("data_situacao_cadastral", closed_from, closed_to)):
         f, t = _d(a, "from"), _d(b, "to", end=True)
         if f and t and f > t:
-            raise ValueError("date range start is after its end")
+            raise ExpectedValidationError("date range start is after its end")
         if f:
             w.append(f"e.{col} >= CAST(? AS DATE)"); p.append(f)
         if t:
@@ -348,9 +349,9 @@ def _fmt_cnpj(c: str) -> str:
 
 def _page(limit: int, offset: int = 0) -> tuple[int, int]:
     if int(limit) < 1:
-        raise ValueError("limit must be at least 1")
+        raise ExpectedValidationError("limit must be at least 1")
     if int(offset) < 0:
-        raise ValueError("offset cannot be negative")
+        raise ExpectedValidationError("offset cannot be negative")
     return min(int(limit), MAX_ROWS), int(offset)
 
 
@@ -416,7 +417,7 @@ def search_companies(cnae: Optional[list[str]] = None, cnae_secao: Optional[str]
                         capital_max, opened_from, opened_to, closed_from, closed_to, mei, simples, name_contains, cep, partner_name)
     orders = {"data_inicio_atividade": "e.data_inicio_atividade DESC NULLS LAST", "capital_social": "e.capital_social DESC NULLS LAST", "razao_social": "e.razao_social"}
     if order_by not in orders:
-        raise ValueError("order_by must be data_inicio_atividade, capital_social or razao_social")
+        raise ExpectedValidationError("order_by must be data_inicio_atividade, capital_social or razao_social")
     limit, offset = _page(limit, offset)
     if min_contact_score is not None:
         tiers = {"low": 0, "medium": 50, "high": 85}
@@ -427,7 +428,7 @@ def search_companies(cnae: Optional[list[str]] = None, cnae_secao: Optional[str]
             elif t.isdigit():
                 min_contact_score = int(t)
         if isinstance(min_contact_score, bool) or not isinstance(min_contact_score, int) or not 0 <= min_contact_score <= 100:
-            raise ValueError("min_contact_score must be an integer from 0 to 100, or one of 'low' (0), 'medium' (50), 'high' (85)")
+            raise ExpectedValidationError("min_contact_score must be an integer from 0 to 100, or one of 'low' (0), 'medium' (50), 'high' (85)")
         if not _has_score():
             raise ValueError("The contact score table is not built on this server.")
     want_score = include_contacts or min_contact_score is not None
@@ -497,19 +498,19 @@ def count_companies(group_by: Optional[list[str]] = None, unit: str = "estabelec
                     mei: Optional[bool] = None, simples: Optional[bool] = None, name_contains: Optional[str] = None, cep: Optional[str] = None,
                     partner_name: Optional[str] = None, order: str = "count_desc", limit: int = 25) -> list[dict]:
     if unit not in ("estabelecimentos", "empresas"):
-        raise ValueError("unit must be estabelecimentos or empresas")
+        raise ExpectedValidationError("unit must be estabelecimentos or empresas")
     if metric not in ("count", "sum_capital"):
-        raise ValueError("metric must be count or sum_capital")
+        raise ExpectedValidationError("metric must be count or sum_capital")
     gb = group_by or []
     if isinstance(gb, str):
         gb = [gb]
     if len(gb) > 2:
-        raise ValueError("group_by takes at most two fields")
+        raise ExpectedValidationError("group_by takes at most two fields")
     for g in gb:
         if g not in GROUPS:
-            raise ValueError(f"group_by {g!r} not supported; options: {', '.join(sorted(GROUPS))}")
+            raise ExpectedValidationError(f"group_by {g!r} not supported; options: {', '.join(sorted(GROUPS))}")
     if order not in ("count_desc", "key_asc", "key_desc"):
-        raise ValueError("order must be count_desc, key_asc or key_desc")
+        raise ExpectedValidationError("order must be count_desc, key_asc or key_desc")
     where, p = _filters(cnae, cnae_secao, include_secondary, uf, municipio, municipio_codigo, situacao, matriz_only, porte, natureza_juridica, capital_min,
                         capital_max, opened_from, opened_to, closed_from, closed_to, mei, simples, name_contains, cep, partner_name, unit)
     if metric == "sum_capital":
@@ -538,7 +539,7 @@ def count_companies(group_by: Optional[list[str]] = None, unit: str = "estabelec
 def get_company(cnpj: str) -> dict:
     x = _digits(cnpj, "cnpj", 8, 14)
     if len(x) not in (8, 14):
-        raise ValueError("cnpj must be 14 digits (or the 8-digit root)")
+        raise ExpectedValidationError("cnpj must be 14 digits (or the 8-digit root)")
     ix = _has_key()
     if ix:
         where, p = ("e.cnpj >= ? AND e.cnpj <= ? AND e.matriz_filial = 1", [x + "000000", x + "999999"]) if len(x) == 8 else ("e.cnpj = ?", [x])
@@ -547,6 +548,9 @@ def get_company(cnpj: str) -> dict:
         where, p = ("e.cnpj_basico = ? AND e.matriz_filial = 1", [x]) if len(x) == 8 else ("e.cnpj = ?", [x])
         rows = run(f"SELECT e.* EXCLUDE (uf) , e.uf FROM e WHERE {where} LIMIT 1", p)
     if not rows:
+        from .telemetry_context import current
+        if current.get() is not None:
+            current.get()["expected_outcome"] = "not_found"
         return {"error": f"CNPJ {cnpj} is not in this snapshot. It may be invalid, newer than the snapshot, or the number was never issued."}
     r = rows[0]
     base = r["cnpj_basico"]
@@ -591,9 +595,9 @@ def search_partners(name: str, contains: bool = False, cpf_middle: Optional[str]
     if contains:
         _name_guard(name, uf)
     if len(name or "") > 256:
-        raise ValueError("Partner name must be at most 256 characters.")
+        raise ExpectedValidationError("Partner name must be at most 256 characters.")
     if not name or len(name.strip()) < 4:
-        raise ValueError("name must have at least 4 characters")
+        raise ExpectedValidationError("name must have at least 4 characters")
     w = ["strip_accents(s.nome_socio) ILIKE strip_accents(?) ESCAPE '\\'" if contains else "strip_accents(upper(s.nome_socio)) = strip_accents(upper(?))"]
     p: list[Any] = [_like(name.strip()) if contains else name.strip()]
     if cpf_middle:
@@ -601,7 +605,7 @@ def search_partners(name: str, contains: bool = False, cpf_middle: Optional[str]
     ew = ""
     if uf:
         if uf.upper() not in UFS:
-            raise ValueError("uf must be a two-letter state code")
+            raise ExpectedValidationError("uf must be a two-letter state code")
         ew = " AND e.uf = ?"; p.append(uf.upper())
     if not contains and (data_dir() / "socios_nome.parquet").exists():
         src = "sn"; w[0] = "nome_key = strip_accents(upper(?))"
@@ -658,7 +662,7 @@ def search_partners(name: str, contains: bool = False, cpf_middle: Optional[str]
 def companies_at_address(cep: Optional[str] = None, logradouro_contains: Optional[str] = None, numero: Optional[str] = None, municipio: Optional[str] = None,
                          uf: Optional[str] = None, situacao: Optional[str] = "ativa", limit: int = 50, offset: int = 0) -> list[dict]:
     if not cep and not logradouro_contains:
-        raise ValueError("give a cep or logradouro_contains")
+        raise ExpectedValidationError("give a cep or logradouro_contains")
     w, p = [], []
     if cep:
         w.append("e.cep = ?"); p.append(_digits(cep, "cep", 8, 8))
@@ -676,12 +680,12 @@ def companies_at_address(cep: Optional[str] = None, logradouro_contains: Optiona
         w.append("strip_accents(e.municipio) = strip_accents(upper(?))"); p.append(municipio.strip())
     if uf:
         if uf.upper() not in UFS:
-            raise ValueError("uf must be a two-letter state code")
+            raise ExpectedValidationError("uf must be a two-letter state code")
         w.append("e.uf = ?"); p.append(uf.upper())
     if situacao:
         k = situacao.lower()
         if k not in SITUACAO:
-            raise ValueError("situacao must be ativa, baixada, suspensa, inapta or nula (or omit for all)")
+            raise ExpectedValidationError("situacao must be ativa, baixada, suspensa, inapta or nula (or omit for all)")
         w.append("e.situacao_cadastral = ?"); p.append(SITUACAO[k])
     limit, offset = _page(limit, offset)
     where = " AND ".join(w)
@@ -700,9 +704,9 @@ def companies_at_address(cep: Optional[str] = None, logradouro_contains: Optiona
 def lookup_codes(kind: str, text: str, limit: int = 25) -> list[dict]:
     tabs = {"cnae": "cnaes", "natureza_juridica": "naturezas", "municipio": "municipios", "motivo": "motivos", "qualificacao": "qualificacoes", "pais": "paises"}
     if kind not in tabs:
-        raise ValueError(f"kind must be one of: {', '.join(tabs)}")
+        raise ExpectedValidationError(f"kind must be one of: {', '.join(tabs)}")
     if not text or not text.strip():
-        raise ValueError("text is required")
+        raise ExpectedValidationError("text is required")
     limit, _ = _page(limit, 0)
     t = text.strip()
     if re.fullmatch(r"\d+", t):
@@ -777,7 +781,7 @@ def _offload_http_tools() -> None:
         async def offloaded(*args, _fn=fn, **kwargs):
             if not _worker_gate.acquire(blocking=False):
                 _metrics_call("rejected")
-                raise RuntimeError("Server is busy with another query. Retry in a few seconds; do not issue parallel scans.")
+                raise WorkerBusyError("Server is busy with another query. Retry in a few seconds; do not issue parallel scans.")
             _metrics_call("busy", True)
             def work():
                 _request.deadline = time.monotonic() + QUERY_TIMEOUT_S
