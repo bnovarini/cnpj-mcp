@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import functools
+import contextvars
 import json
 import os
 import re
@@ -164,8 +165,15 @@ def con() -> duckdb.DuckDBPyConnection:
 
 
 def run(sql: str, params: list[Any] | None = None) -> list[dict]:
+    from .telemetry_context import current
+    measurement = current.get()
+    db_started = time.monotonic()
+    if measurement is not None:
+        measurement["db_calls"] += 1
     remaining = min(QUERY_TIMEOUT_S, getattr(_request, "deadline", time.monotonic() + QUERY_TIMEOUT_S) - time.monotonic())
     if remaining <= 0:
+        if measurement is not None:
+            measurement["error_class"] = "timeout"
         raise RuntimeError("Query deadline reached. Narrow the state (uf), activity (cnae), or date range and retry.")
     cur = con().cursor()
     timer = threading.Timer(remaining, cur.interrupt)
@@ -176,10 +184,14 @@ def run(sql: str, params: list[Any] | None = None) -> list[dict]:
         cols = [x[0] for x in cur.description]
         return [{k: (round(v, 2) if isinstance(v, float) else (v.isoformat() if isinstance(v, date) else v)) for k, v in zip(cols, r)} for r in rows]
     except duckdb.InterruptException:
+        if measurement is not None:
+            measurement["error_class"] = "timeout"
         raise RuntimeError(f"Query exceeded the {QUERY_TIMEOUT_S:.0f}s request budget and was stopped. Narrow the state (uf), activity (cnae), or date range and retry; no partial results are returned.")
     finally:
         timer.cancel()
         cur.close()
+        if measurement is not None:
+            measurement["db_ms"] += max(0.0, (time.monotonic() - db_started) * 1000)
 
 
 def _name_guard(name: Optional[str], uf: Optional[str]) -> None:
@@ -761,7 +773,7 @@ def _offload_http_tools() -> None:
                 finally:
                     del _request.deadline
             try:
-                future = _worker.submit(work)
+                future = _worker.submit(contextvars.copy_context().run, work)
             except BaseException:
                 _worker_gate.release()
                 raise
@@ -790,11 +802,17 @@ def http_app():
     app = RateLimit(mcp.streamable_http_app(), int(os.environ.get("CNPJ_RATE_PER_MIN", "60")))
     from .observability import from_env
     tools = [t.name for t in mcp._tool_manager.list_tools()]
-    observer = from_env(tools)
+    observer = from_env({t.name: set(t.fn_metadata.arg_model.model_fields) for t in mcp._tool_manager.list_tools()})
     record_local = os.environ.get("CNPJ_USAGE_LOG", "1") != "0"
     if record_local or observer:
         from .usage import UsageLog
         app = UsageLog(app, tools, observer=observer, record_local=record_local)
+    if observer:
+        from .telemetry_context import instrument
+        for tool in mcp._tool_manager.list_tools():
+            if not getattr(tool.fn, "_context_measured", False):
+                instrument(tool)
+                tool.fn._context_measured = True
     return app
 
 
