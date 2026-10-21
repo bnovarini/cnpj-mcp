@@ -1,6 +1,7 @@
 """Privacy-first usage logging: one row per tool call or client handshake, kept in a local SQLite file.
 
-Stored: UTC timestamp, event ("initialize" or "tool_call"), tool name, client name and version from the MCP initialize handshake.
+Stored: UTC timestamp, event ("initialize" or "tool_call"), tool name, client name and version from the MCP initialize handshake,
+plus request duration in ms and an outcome class (ok, tool_error, rpc_error, http_4xx, http_5xx, exception, aborted) from the HTTP response.
 Not stored: arguments, query text, results, IP addresses, User-Agent or any identifier.
 Tool calls are tied to a client name through a short-lived in-memory map (never written to disk) because the server is stateless.
 
@@ -28,6 +29,13 @@ def _path() -> str:
 def _conn() -> sqlite3.Connection:
     c = sqlite3.connect(_path(), timeout=5)
     c.execute("CREATE TABLE IF NOT EXISTS usage(ts TEXT, event TEXT, tool TEXT, client_name TEXT, client_version TEXT, user_agent TEXT)")
+    cols = {r[1] for r in c.execute("PRAGMA table_info(usage)")}
+    for col, typ in (("duration_ms", "INTEGER"), ("status", "TEXT")):
+        if col not in cols:
+            try:
+                c.execute("ALTER TABLE usage ADD COLUMN %s %s" % (col, typ))
+            except sqlite3.OperationalError:
+                pass
     return c
 
 
@@ -45,11 +53,11 @@ class UsageLog:
         ip = (h.get(b"fly-client-ip") or h.get(b"x-forwarded-for", b"").split(b",")[0] or b"?")
         return hashlib.sha256(self.salt + ip + h.get(b"user-agent", b"")).hexdigest()
 
-    def _record(self, rows):
+    def _record(self, rows, dur=None, st=None):
         try:
             with _lock:
                 c = _conn()
-                c.executemany("INSERT INTO usage VALUES(?,?,?,?,?,?)", rows)
+                c.executemany("INSERT INTO usage VALUES(?,?,?,?,?,?,?,?)", [tuple(r) + (dur, st) for r in rows])
                 c.commit(); c.close()
         except Exception:
             pass  # logging must never break a request
@@ -62,6 +70,7 @@ class UsageLog:
             m = await receive()
             chunks.append(m.get("body", b"")); more = m.get("more_body", False)
         body = b"".join(chunks)
+        rows = []
         try:
             msgs = json.loads(body)
             msgs = msgs if isinstance(msgs, list) else [msgs]
@@ -82,8 +91,6 @@ class UsageLog:
                     rows.append((ts, "tool_call", name if name in self.tools else "(unknown)", cn, cv, ua))
             if len(self.seen) > 5000:
                 self.seen = {k: v for k, v in self.seen.items() if now - v[2] < TTL}
-            if rows:
-                self._record(rows)
         except Exception:
             pass
         sent = False
@@ -94,7 +101,43 @@ class UsageLog:
                 sent = True
                 return {"type": "http.request", "body": body, "more_body": False}
             return await receive()
-        await self.app(scope, replay, send)
+        info, buf = {"code": 0}, []
+
+        async def cap(message):
+            if message["type"] == "http.response.start":
+                info["code"] = message["status"]
+            elif message["type"] == "http.response.body" and sum(map(len, buf)) < 262144:
+                buf.append(message.get("body", b""))
+            await send(message)
+
+        t0, outcome = time.time(), None
+        try:
+            await self.app(scope, replay, cap)
+        except BaseException:
+            outcome = "exception"
+            raise
+        finally:
+            try:
+                dur = int((time.time() - t0) * 1000)
+                if outcome is None:
+                    code = info["code"]
+                    b = b"".join(buf)
+                    if code == 0:
+                        outcome = "aborted"
+                    elif code >= 500:
+                        outcome = "http_5xx"
+                    elif code >= 400:
+                        outcome = "http_4xx"
+                    elif b'"isError":true' in b or b'"isError": true' in b:
+                        outcome = "tool_error"
+                    elif b'"error":{' in b[:2000] or b'"error": {' in b[:2000]:
+                        outcome = "rpc_error"
+                    else:
+                        outcome = "ok"
+                if rows:
+                    self._record(rows, dur, outcome)
+            except Exception:
+                pass
 
 
 def stats(days: int = 30) -> dict:
