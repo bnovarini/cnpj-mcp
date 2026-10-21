@@ -50,7 +50,7 @@ def scrub_span(span):
     return span
 
 
-def scrub_event(event):
+def scrub_event(event, triage=False, tools=()):
     """Rebuild allowlist; only SDK-generated anonymous event identity is retained."""
     if event.get("event") != "$exception":
         return None
@@ -60,17 +60,24 @@ def scrub_event(event):
     safe = _metadata(props)
     safe.update({"$exception_list": [{"type": typ if typ in ERROR_TYPES else "Exception", "value": MESSAGE}],
                  "$geoip_disable": True, "$process_person_profile": False})
+    if triage:
+        from .error_triage import issue
+        tool = props.get("tool") if props.get("tool") in tools else "unknown"
+        mechanism = errors[0].get("mechanism", {})
+        handled = mechanism.get("handled") is True
+        safe.update(issue(tool, props.get("error_class"), handled))
     return {"event": "$exception", "timestamp": event.get("timestamp"),
             "distinct_id": event.get("distinct_id"), "properties": safe}
 
 
 class Observability:
-    def __init__(self, token, tools, host="https://us.i.posthog.com", logs=False, analytics=False, metrics=False, mcp_analytics=False):
+    def __init__(self, token, tools, host="https://us.i.posthog.com", logs=False, analytics=False, metrics=False, mcp_analytics=False, error_triage=False):
         from posthog import Posthog
         self.tools = frozenset(tools)
         self.schemas = tools if isinstance(tools, dict) else {}
         self.analytics = analytics
         self.mcp_analytics = mcp_analytics
+        self.error_triage = error_triage
         self.app_version = "0.1.0"
         self.deploy_version = version(os.environ.get("CNPJ_DEPLOY_VERSION", "unknown"))
         self.logs = None
@@ -103,7 +110,7 @@ class Observability:
         if self.analytics and not self.mcp_analytics and event.get("event") == "tool_called":
             from .product_analytics import scrub
             return scrub(event, self.schemas, self.tools)
-        return scrub_event(event)
+        return scrub_event(event, self.error_triage, self.tools)
 
     def record(self, rows, started, duration, status, error_type=None, measurements=None, shapes=None):
         # Never inherit a caller's PostHog person/session or active trace context.
@@ -156,10 +163,15 @@ class Observability:
             span.set_status("ok" if status == "ok" else "error")
             span.end()
             if status != "ok":
+                from .error_triage import EXPECTED
+                if self.error_triage and measured.get("expected_outcome") in EXPECTED:
+                    continue
+
                 typ = error_type if error_type in ERROR_TYPES else "ToolError"
                 # Deliberately no real exception object, traceback, locals or message.
                 self.client.capture("$exception", properties={**values,
-                    "$exception_list": [{"type": typ, "value": MESSAGE}]})
+                    "$exception_list": [{"type": typ, "value": MESSAGE,
+                        "mechanism": {"handled": status != "exception" and status != "aborted"}}]})
 
     def shutdown(self):
         try:
@@ -179,6 +191,6 @@ def from_env(tools):
     if host not in {"https://us.i.posthog.com", "https://eu.i.posthog.com"}:
         return None
     try:
-        return Observability(token, tools, host, logs=os.environ.get("CNPJ_POSTHOG_LOGS") == "1", analytics=os.environ.get("CNPJ_POSTHOG_ANALYTICS") == "1", metrics=os.environ.get("CNPJ_POSTHOG_METRICS") == "1", mcp_analytics=os.environ.get("CNPJ_POSTHOG_MCP_ANALYTICS") == "1")
+        return Observability(token, tools, host, logs=os.environ.get("CNPJ_POSTHOG_LOGS") == "1", analytics=os.environ.get("CNPJ_POSTHOG_ANALYTICS") == "1", metrics=os.environ.get("CNPJ_POSTHOG_METRICS") == "1", mcp_analytics=os.environ.get("CNPJ_POSTHOG_MCP_ANALYTICS") == "1", error_triage=os.environ.get("CNPJ_POSTHOG_ERROR_TRIAGE") == "1")
     except Exception:
         return None  # Telemetry must never prevent serving queries.
