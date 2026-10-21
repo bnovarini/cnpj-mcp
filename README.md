@@ -203,3 +203,32 @@ the receiving service, as with existing exporters.
 Sampler stops and last aggregate flushes on graceful shutdown; abrupt kill can
 lose a window. SDK retries are at-least-once and may duplicate a delta after an
 ambiguous network failure. No wizard, auto-instrumentation or scraping agent.
+
+### Minimal canonical MCP Analytics adapter
+
+`CNPJ_POSTHOG_MCP_ANALYTICS=1` opts into one canonical `$mcp_tool_call` event
+per recognized completed HTTP tool call. It takes precedence over
+`CNPJ_POSTHOG_ANALYTICS`: canonical replaces `tool_called`, never both.
+With the flag absent, existing aggregate analytics behavior is unchanged.
+
+This is a manual allowlisted adapter, NOT the default `posthog.mcp.instrument`
+or wizard installation. No tool-schema, response or session-token changes.
+Canonical fields: fixed source/interface/server name/version, registered tool
+name/resource name, error boolean and fixed error class, bucket-representative
+numeric duration. 10001ms means >10s, not an exact measurement. No client fields,
+arguments or names, results/buckets, intent, model, user agent/vendor header,
+IP, session/conversation/person or raw error text. Fresh random SDK anonymous
+ID per event; profiles and GeoIP off. Existing scrubbed diagnostics/Metrics
+continue independently, with no extra MCP-specific exception event.
+
+The activity feed/SQL can use canonical event names and fields. Native MCP
+per-tool call/error/latency views are the target, but unverified without session
+IDs; no guarantee all native UI queries accept this reduced shape. Latency
+percentiles are bucket approximations. Session timelines, sequences, user
+retention, model comparisons, intent clusters, missing-capability reports and
+advertised-but-unused-tool joins have no data in this mode. Historical
+`tool_called` events stay under their old event name; no backfill or deletion.
+
+These are standard events, sharing Product Analytics allowance/limit with
+other events, not a fresh 1M free tier. Actual cap remains unverified. Do not
+assume AI intent/summary features are free or enable them with this adapter.
