@@ -121,6 +121,17 @@ class UsageLog:
                 buf.append(message.get("body", b""))
             await send(message)
 
+        from .telemetry_context import calls
+        measurements = []
+        token = calls.set(measurements)
+        shapes = []
+        try:
+            for m in (msgs if isinstance(msgs, list) else []):
+                if isinstance(m, dict) and m.get("method") == "tools/call":
+                    params = m.get("params") or {}
+                    shapes.append((params.get("name"), list((params.get("arguments") or {}).keys())))
+        except Exception:
+            pass
         t0, outcome, error_type = time.time(), None, None
         try:
             await self.app(scope, replay, cap)
@@ -149,9 +160,11 @@ class UsageLog:
                 if rows and self.record_local:
                     self._record(rows, dur, outcome)
                 if rows and self.observer:
-                    self.observer.record(rows, t0, dur, outcome, error_type)
+                    self.observer.record(rows, t0, dur, outcome, error_type, measurements=measurements, shapes=shapes)
             except Exception:
                 pass
+            finally:
+                calls.reset(token)
 
 
 def stats(days: int = 30) -> dict:
