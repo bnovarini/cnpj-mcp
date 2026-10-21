@@ -65,10 +65,11 @@ def scrub_event(event):
 
 
 class Observability:
-    def __init__(self, token, tools, host="https://us.i.posthog.com", logs=False):
+    def __init__(self, token, tools, host="https://us.i.posthog.com", logs=False, analytics=False):
         from posthog import Posthog
         self.tools = frozenset(tools)
         self.schemas = tools if isinstance(tools, dict) else {}
+        self.analytics = analytics
         self.app_version = "0.1.0"
         self.deploy_version = version(os.environ.get("CNPJ_DEPLOY_VERSION", "unknown"))
         self.logs = None
@@ -81,12 +82,18 @@ class Observability:
         self.client = Posthog(
             token, host=host, disable_geoip=True, enable_exception_autocapture=False,
             capture_exception_code_variables=False, enable_local_evaluation=False,
-            before_send=scrub_event, max_queue_size=256, flush_interval=2,
+            before_send=self._before_send, max_queue_size=256, flush_interval=2,
             timeout=2, max_retries=0,
             traces={"service_name": "cnpj-mcp", "before_span_send": scrub_span,
                     "resource_attributes": {"os.name": None, "os.version": None},
                     "max_queue_size": 256, "max_export_batch_size": 64, "flush_interval": 2},
         )
+
+    def _before_send(self, event):
+        if self.analytics and event.get("event") == "tool_called":
+            from .product_analytics import scrub
+            return scrub(event, self.schemas, self.tools)
+        return scrub_event(event)
 
     def record(self, rows, started, duration, status, error_type=None, measurements=None, shapes=None):
         # Never inherit a caller's PostHog person/session or active trace context.
@@ -115,6 +122,12 @@ class Observability:
                           result_bucket=measured.get("result_bucket", "unknown"), cache="not_applicable",
                           app_version=self.app_version, deploy_version=self.deploy_version,
                           utc_hour=datetime.fromtimestamp(started, timezone.utc).hour)
+            if self.analytics:
+                from .product_analytics import duration_bucket
+                self.client.capture("tool_called", properties={
+                    "tool": tool, "status": status, "duration_bucket": duration_bucket(duration),
+                    "result_bucket": values.get("result_bucket", "unknown"), "argument_names": names,
+                    "client_name": row[3], "client_version": row[4]})
             index += 1
             if self.logs:
                 try:
@@ -147,6 +160,6 @@ def from_env(tools):
     if host not in {"https://us.i.posthog.com", "https://eu.i.posthog.com"}:
         return None
     try:
-        return Observability(token, tools, host, logs=os.environ.get("CNPJ_POSTHOG_LOGS") == "1")
+        return Observability(token, tools, host, logs=os.environ.get("CNPJ_POSTHOG_LOGS") == "1", analytics=os.environ.get("CNPJ_POSTHOG_ANALYTICS") == "1")
     except Exception:
         return None  # Telemetry must never prevent serving queries.
