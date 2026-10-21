@@ -232,3 +232,34 @@ advertised-but-unused-tool joins have no data in this mode. Historical
 These are standard events, sharing Product Analytics allowance/limit with
 other events, not a fresh 1M free tier. Actual cap remains unverified. Do not
 assume AI intent/summary features are free or enable them with this adapter.
+
+### Error triage (opt-in)
+
+`CNPJ_POSTHOG_ERROR_TRIAGE=1` enables fixed synthetic issue titles/fingerprints,
+truthful handled/synthetic mechanism and narrow expected-error filtering.
+With the flag absent, prior exception selection and format remain unchanged.
+No raw exception objects, messages, traces, locals, identity or sessions added.
+
+Grouping is `cnpj:v1:<registered-tool>:<fixed-error-class>`, not per deploy or
+client. Issue title is tool plus fixed class type. Existing old issues are not
+renamed or backfilled. Coarse groups can still contain more than one root cause.
+Caught tool/RPC/HTTP failures are marked handled; escaping ASGI exceptions and
+aborted requests are not falsely marked handled. All reports are synthetic,
+with no manufactured stacktrace.
+
+Only three explicitly marked expected outcomes suppress `$exception`:
+- Validation guards in our own tool code (ExpectedValidationError, still a
+  ValueError with identical message). Ordinary ValueError/TypeError, SDK schema
+  failures with no trusted marker, and unavailable contact-score table remain.
+- The actual one-worker busy gate (WorkerBusyError, still a RuntimeError with
+  identical message). Classified rate_limit without reading its message.
+- The explicit get_company not-in-snapshot branch. It already returns a normal
+  result envelope and usually emitted no exception; this is not claimed as a
+  new volume reduction. No string matching on results/errors.
+
+Other generic tool_error/rpc_error, HTTP4xx/429 without a trusted branch marker,
+timeout, database/internal failure and abort remain eligible. Rate limiter
+currently runs outside tool telemetry, so this does not add or suppress its
+standalone HTTP429 events. All existing Logs, Traces, Metrics and canonical
+call events continue, including expected outcomes. Filtering never hides them
+from operational counters. Release linking and alerts are not part of this build.
