@@ -5,6 +5,8 @@ DuckDB queries Parquet files directly. Values are kept in Portuguese exactly as 
 """
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import functools
 import json
 import os
@@ -25,7 +27,7 @@ MAX_ROWS = 100
 STREET_TYPES = {"AV": "AVENIDA", "AVENIDA": "AVENIDA", "R": "RUA", "RUA": "RUA", "AL": "ALAMEDA", "ALAMEDA": "ALAMEDA", "TV": "TRAVESSA", "TRAV": "TRAVESSA",
                 "TRAVESSA": "TRAVESSA", "ROD": "RODOVIA", "RODOVIA": "RODOVIA", "EST": "ESTRADA", "ESTR": "ESTRADA", "ESTRADA": "ESTRADA", "PC": "PRACA",
                 "PCA": "PRACA", "PRACA": "PRACA", "PRAÇA": "PRACA", "LG": "LARGO", "LARGO": "LARGO", "PQ": "PARQUE", "PARQUE": "PARQUE", "VL": "VILA"}
-QUERY_TIMEOUT_S = float(os.environ.get("CNPJ_QUERY_TIMEOUT", "40"))
+QUERY_TIMEOUT_S = float(os.environ.get("CNPJ_QUERY_TIMEOUT", "10"))
 
 NOTE = (
     "Data: Receita Federal open CNPJ dump (dados abertos), one monthly snapshot of every company and establishment registered in Brazil, "
@@ -37,6 +39,9 @@ NOTE = (
 )
 mcp = FastMCP("cnpj-mcp", instructions=NOTE)
 _con: Optional[duckdb.DuckDBPyConnection] = None
+_request = threading.local()
+_worker = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="cnpj-query")
+_worker_gate = threading.Lock()
 
 
 def _has_key() -> bool:
@@ -159,18 +164,31 @@ def con() -> duckdb.DuckDBPyConnection:
 
 
 def run(sql: str, params: list[Any] | None = None) -> list[dict]:
+    remaining = min(QUERY_TIMEOUT_S, getattr(_request, "deadline", time.monotonic() + QUERY_TIMEOUT_S) - time.monotonic())
+    if remaining <= 0:
+        raise RuntimeError("Query deadline reached. Narrow the state (uf), activity (cnae), or date range and retry.")
     cur = con().cursor()
-    timer = threading.Timer(QUERY_TIMEOUT_S, cur.interrupt)
+    timer = threading.Timer(remaining, cur.interrupt)
     timer.start()
     try:
         cur.execute(sql, params or [])
         rows = cur.fetchall()
+        cols = [x[0] for x in cur.description]
+        return [{k: (round(v, 2) if isinstance(v, float) else (v.isoformat() if isinstance(v, date) else v)) for k, v in zip(cols, r)} for r in rows]
     except duckdb.InterruptException:
-        raise RuntimeError(f"Query took longer than {QUERY_TIMEOUT_S:.0f}s and was stopped. Add a state (uf), cnae or date filter.")
+        raise RuntimeError(f"Query exceeded the {QUERY_TIMEOUT_S:.0f}s request budget and was stopped. Narrow the state (uf), activity (cnae), or date range and retry; no partial results are returned.")
     finally:
         timer.cancel()
-    cols = [x[0] for x in cur.description]
-    return [{k: (round(v, 2) if isinstance(v, float) else (v.isoformat() if isinstance(v, date) else v)) for k, v in zip(cols, r)} for r in rows]
+        cur.close()
+
+
+def _name_guard(name: Optional[str], uf: Optional[str]) -> None:
+    if name is None:
+        return
+    if not 3 <= len(name.strip()) <= 256:
+        raise ValueError("name_contains must have 3 to 256 characters. Use a distinctive part of the company name.")
+    if not uf:
+        raise ValueError("Name substring searches require a state (uf), for example RJ. Add uf and retry; nationwide name substring scans are not supported.")
 
 
 # ---------------- codes and filters ----------------
@@ -232,6 +250,7 @@ def _norm(s: str) -> str:
 def _filters(cnae=None, cnae_secao=None, include_secondary=False, uf=None, municipio=None, municipio_codigo=None, situacao=None, matriz_only=None,
              porte=None, natureza_juridica=None, capital_min=None, capital_max=None, opened_from=None, opened_to=None,
              closed_from=None, closed_to=None, mei=None, simples=None, name_contains=None, cep=None, partner_name=None, unit=None):
+    _name_guard(name_contains, uf)
     w: list[str] = []
     p: list[Any] = []
     if cnae:
@@ -328,7 +347,7 @@ FILTER_DOC = (
     "cnae_secao (letter A-U), uf, municipio (name as in Receita, accents ignored), municipio_codigo, situacao (ativa, baixada, suspensa, inapta, nula), matriz_only, "
     "porte (micro = ME, pequeno = EPP, demais, nao_informado), natureza_juridica (code prefix like '2062' or text like 'sociedade limitada'), capital_min/capital_max (BRL), "
     "opened_from/opened_to (data_inicio_atividade, YYYY-MM or YYYY-MM-DD), closed_from/closed_to (data da baixa), mei, simples (true/false), "
-    "name_contains (razao social or nome fantasia), cep, partner_name (a partner's name contains this text)."
+    "name_contains (razao social or nome fantasia; 3-256 characters and uf required), cep, partner_name (a partner's name contains this text)."
 )
 
 
@@ -553,10 +572,14 @@ def list_partners(cnpj: str) -> list[dict]:
 
 
 @mcp.tool(description="Find the companies a person or entity is a partner of, by name. Exact (accent-insensitive, case-insensitive) match on the partner name by default; "
-                      "set contains=true for a substring match. Optionally narrow with cpf_middle (the 6 digits Receita publishes, e.g. '240659') because the same name "
+                      "set contains=true for a substring match (uf required). Optionally narrow with cpf_middle (the 6 digits Receita publishes, e.g. '240659') because the same name "
                       "can belong to different people. Returns company name, status and role.")
 @_split_pages("partners")
 def search_partners(name: str, contains: bool = False, cpf_middle: Optional[str] = None, uf: Optional[str] = None, limit: int = 25, offset: int = 0) -> dict:
+    if contains:
+        _name_guard(name, uf)
+    if len(name or "") > 256:
+        raise ValueError("Partner name must be at most 256 characters.")
     if not name or len(name.strip()) < 4:
         raise ValueError("name must have at least 4 characters")
     w = ["strip_accents(s.nome_socio) ILIKE strip_accents(?) ESCAPE '\\'" if contains else "strip_accents(upper(s.nome_socio)) = strip_accents(upper(?))"]
@@ -713,7 +736,45 @@ def _forbid_extra_arguments() -> None:
 _forbid_extra_arguments()
 
 
+def _offload_http_tools() -> None:
+    """One bounded worker; busy clients retry, never queue unbounded scans."""
+    for tool in mcp._tool_manager.list_tools():
+        if getattr(tool.fn, "_offloaded", False):
+            continue
+        fn = tool.fn
+        if tool.name == "dataset_info":
+            @functools.wraps(fn)
+            async def fast(*args, _fn=fn, **kwargs):
+                return _fn(*args, **kwargs)
+            fast._offloaded = True
+            tool.fn, tool.is_async = fast, True
+            continue
+
+        @functools.wraps(fn)
+        async def offloaded(*args, _fn=fn, **kwargs):
+            if not _worker_gate.acquire(blocking=False):
+                raise RuntimeError("Server is busy with another query. Retry in a few seconds; do not issue parallel scans.")
+            def work():
+                _request.deadline = time.monotonic() + QUERY_TIMEOUT_S
+                try:
+                    return _fn(*args, **kwargs)
+                finally:
+                    del _request.deadline
+            try:
+                future = _worker.submit(work)
+            except BaseException:
+                _worker_gate.release()
+                raise
+            future.add_done_callback(lambda _: _worker_gate.release())
+            return await asyncio.shield(asyncio.wrap_future(future))
+        offloaded._offloaded = True
+        tool.fn, tool.is_async = offloaded, True
+
+
 def http_app():
+    # Load the read-only views once before queries reach the worker.
+    con()
+    _offload_http_tools()
     from mcp.server.transport_security import TransportSecuritySettings
     from starlette.responses import JSONResponse
     hosts = [h for h in os.environ.get("CNPJ_ALLOWED_HOSTS", "").split(",") if h]
