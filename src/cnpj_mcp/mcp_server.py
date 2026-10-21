@@ -748,6 +748,17 @@ def _forbid_extra_arguments() -> None:
 _forbid_extra_arguments()
 
 
+_metrics = None
+
+
+def _metrics_call(method, *args):
+    try:
+        if _metrics:
+            getattr(_metrics, method)(*args)
+    except Exception:
+        pass
+
+
 def _offload_http_tools() -> None:
     """One bounded worker; busy clients retry, never queue unbounded scans."""
     for tool in mcp._tool_manager.list_tools():
@@ -765,7 +776,9 @@ def _offload_http_tools() -> None:
         @functools.wraps(fn)
         async def offloaded(*args, _fn=fn, **kwargs):
             if not _worker_gate.acquire(blocking=False):
+                _metrics_call("rejected")
                 raise RuntimeError("Server is busy with another query. Retry in a few seconds; do not issue parallel scans.")
+            _metrics_call("busy", True)
             def work():
                 _request.deadline = time.monotonic() + QUERY_TIMEOUT_S
                 try:
@@ -775,9 +788,13 @@ def _offload_http_tools() -> None:
             try:
                 future = _worker.submit(contextvars.copy_context().run, work)
             except BaseException:
+                _metrics_call("busy", False)
                 _worker_gate.release()
                 raise
-            future.add_done_callback(lambda _: _worker_gate.release())
+            def finished(_):
+                _metrics_call("busy", False)
+                _worker_gate.release()
+            future.add_done_callback(finished)
             return await asyncio.shield(asyncio.wrap_future(future))
         offloaded._offloaded = True
         tool.fn, tool.is_async = offloaded, True
@@ -803,6 +820,8 @@ def http_app():
     from .observability import from_env
     tools = [t.name for t in mcp._tool_manager.list_tools()]
     observer = from_env({t.name: set(t.fn_metadata.arg_model.model_fields) for t in mcp._tool_manager.list_tools()})
+    global _metrics
+    _metrics = getattr(observer, "metrics", None)
     record_local = os.environ.get("CNPJ_USAGE_LOG", "1") != "0"
     if record_local or observer:
         from .usage import UsageLog
