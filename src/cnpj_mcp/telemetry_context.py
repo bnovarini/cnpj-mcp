@@ -56,6 +56,12 @@ def instrument(tool):
                 data["error_class"] = "tool_error"
             return result
         except BaseException as exc:
+            from .error_triage import ExpectedValidationError, WorkerBusyError
+            if isinstance(exc, ExpectedValidationError):
+                data["expected_outcome"] = "validation"
+            elif isinstance(exc, WorkerBusyError):
+                data["expected_outcome"] = "busy"
+                data["error_class"] = "rate_limit"
             if data["error_class"] == "none":
                 data["error_class"] = error_class(exc)
             raise
